@@ -16,7 +16,7 @@ import webbrowser
 from ytd_core import Track, validate_track, validate_url, format_error
 from ytd_jobs import WorkerJob
 
-APP_VERSION = '0.3'
+APP_VERSION = '0.3.1'
 FIELDS = [('title', 'Title'), ('artist', 'Artist'), ('album', 'Album'),
           ('albumartist', 'Album artist'), ('track', 'Track number'),
           ('year', 'Year'), ('genre', 'Genre'), ('artwork', 'Artwork URL')]
@@ -210,7 +210,7 @@ class App:
         self.mode_picker.configure(state='disabled' if value else 'readonly')
         pending = len(self.completed) < len(self.tracks)
         self.download_button.configure(state='normal' if self.tracks and pending and not value else 'disabled',
-            text='Retry unfinished songs' if self.completed or any(self.tree.set(str(i), 'state') == 'Failed' for i in range(len(self.tracks))) else 'Download songs')
+            text='Retry unfinished songs' if self.completed or any(self.tree.set(str(i), 'state') in ('Failed', 'Needs sign-in') for i in range(len(self.tracks))) else 'Download songs')
         for entry in self.entries:
             entry.configure(state='normal' if self.current is not None and not value else 'disabled')
         self.art_button.configure(state='normal' if self.current is not None and not value else 'disabled')
@@ -400,9 +400,10 @@ class App:
             self.finish_preview(error=value['message'], cancelled=self.cancel_requested)
             return
         index = self.batch[self.batch_position]
-        self.update_row(index, 'Failed')
-        self.append_log(f'Failed: {self.tracks[index].title}: {value["message"]}')
-        self.consecutive_failures += 1
+        self.update_row(index, 'Needs sign-in' if value.get('needs_sign_in') else 'Failed')
+        self.append_log(f'Skipped: {self.tracks[index].title}: {value["message"]}' if value.get('video_only')
+                        else f'Failed: {self.tracks[index].title}: {value["message"]}')
+        self.consecutive_failures = 0 if value.get('video_only') else self.consecutive_failures + 1
         self.close_job()
         self.batch_position += 1
         if value.get('stop_batch') or self.consecutive_failures >= 2:

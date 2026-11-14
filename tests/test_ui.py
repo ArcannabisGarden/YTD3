@@ -204,3 +204,25 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(len(FakeJob.jobs), count)
         self.app.toggle_pause()
         self.assertEqual(self.app.job.payload['track']['video_id'], 'b')
+
+    def test_two_age_restricted_songs_do_not_stop_other_downloads(self):
+        self.load_preview()
+        third = Track('https://youtu.be/c', 'c', 'Third', 'Artist', album='Album', track='3')
+        self.app.tracks.append(third)
+        self.app.tree.insert('', 'end', iid='2', text=third.title,
+                             values=(third.artist, third.album, third.track, 'Ready'))
+        self.app.download()
+        error = {'message': 'This song needs YouTube age verification.',
+                 'stop_batch': False, 'video_only': True, 'needs_sign_in': True}
+        for index in (0, 1):
+            self.app.job.events.append(('error', error))
+            self.app.poll()
+            self.assertEqual(self.app.tree.set(str(index), 'state'), 'Needs sign-in')
+            self.assertTrue(self.app.busy)
+        self.assertEqual(self.app.job.payload['track']['video_id'], 'c')
+        self.app.job.events.append(('result', {'path': 'third.mp3', 'warning': ''}))
+        self.app.poll()
+        self.assertEqual(self.app.completed, {2})
+        self.assertFalse(self.app.busy)
+        self.app.download()
+        self.assertEqual(self.app.batch, [0, 1])

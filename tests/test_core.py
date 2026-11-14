@@ -110,6 +110,51 @@ class CoreTests(unittest.TestCase):
         self.assertIn('HTTP Error 403', error)
         self.assertNotIn('secret', error)
 
+    def test_age_gate_applies_only_to_one_video(self):
+        message = ('ERROR: [youtube] QytrJ_8kXNE: Sign in to confirm your age. '
+                   'This video may be inappropriate for some users. Use --cookies-from-browser or --cookies for authentication.')
+        for reason in (message, 'This is an age-restricted video'):
+            with self.subTest(reason=reason):
+                error = core.classify_download_error(RuntimeError(reason))
+                self.assertFalse(error.stop_batch)
+                self.assertTrue(error.video_only)
+                self.assertTrue(error.needs_sign_in)
+                self.assertIn('age verification', str(error))
+        bot = core.classify_download_error(RuntimeError('Sign in to confirm you are not a bot'))
+        self.assertTrue(bot.stop_batch)
+        self.assertFalse(bot.video_only)
+
+    def test_matching_saved_song_is_reused_after_restart(self):
+        def audio(url, temporary, *args, **kwargs):
+            path = Path(temporary) / 'source.wav'
+            make_tone(path)
+            return path
+        track = self.track(album='Album', track='1')
+        with tempfile.TemporaryDirectory() as folder:
+            with patch('ytd_core.fetch_audio', side_effect=audio) as fetch:
+                first, _ = core.download_track(track, folder)
+                original = first.read_bytes()
+                second, message = core.download_track(track, folder)
+                fetch.assert_called_once()
+            self.assertEqual(first, second)
+            self.assertEqual(first.read_bytes(), original)
+            self.assertIn('Existing matching download kept', message)
+            self.assertEqual(len(list(Path(folder).iterdir())), 1)
+
+    def test_existing_file_must_match_source_tags_and_valid_audio(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            path = folder / 'Artist - Song (Live).mp3'
+            source = folder / 'tone.wav'
+            make_tone(source)
+            core.convert(source, path)
+            core.write_tags(path, self.track(url='https://youtu.be/different'))
+            self.assertIsNone(core.matching_existing_download(self.track(), folder))
+            core.write_tags(path, self.track(album='Different Album'))
+            self.assertIsNone(core.matching_existing_download(self.track(), folder))
+            path.write_bytes(b'partial file without valid audio')
+            self.assertIsNone(core.matching_existing_download(self.track(), folder))
+
     def test_session_uses_private_copy_and_bounded_retries(self):
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)

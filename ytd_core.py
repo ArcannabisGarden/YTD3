@@ -2,6 +2,7 @@
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+import glob
 import os
 import re
 import shutil
@@ -57,9 +58,11 @@ def is_album_playlist(url):
 
 
 class DownloadFailure(RuntimeError):
-    def __init__(self, message, stop_batch=False):
+    def __init__(self, message, stop_batch=False, video_only=False, needs_sign_in=False):
         super().__init__(message)
         self.stop_batch = stop_batch
+        self.video_only = video_only
+        self.needs_sign_in = needs_sign_in
 
 
 def format_error(error):
@@ -73,7 +76,15 @@ def format_error(error):
 
 def classify_download_error(error):
     text = format_error(error)
-    lowered = text.lower()
+    lowered = str(error).lower()
+    # Age verification applies to this video, not the whole playlist.
+    if any(word in lowered for word in ('confirm your age', 'age-restricted', 'age restricted', 'age restriction')):
+        return DownloadFailure(
+            'This song needs YouTube age verification. Check that it plays in your signed-in browser. '
+            'To retry it in the app, load a local cookies.txt session from that account, then retry unfinished songs. '
+            'Other songs in the playlist will continue.\nDetails: ' + text,
+            video_only=True, needs_sign_in=True,
+        )
     if any(word in lowered for word in (
         'not a bot', 'sign in', 'login required', 'cookies', 'http error 403', 'http error 429',
         'potoken', 'po token', 'sabr', 'maximum', 'retry', 'retries', 'timed out', 'timeout',
@@ -347,12 +358,56 @@ def _fetch_audio(url, temporary, progress, *, cookies_file, session_dir, report)
     return source
 
 
+def source_video_id(url):
+    try:
+        parsed = validate_url(url)
+    except ValueError:
+        return ''
+    if parsed.hostname in ('youtu.be', 'www.youtu.be'):
+        return parsed.path.strip('/').split('/')[0]
+    return parse_qs(parsed.query).get('v', [''])[0]
+
+
+def matching_existing_download(track, folder):
+    """Reuse an app-created MP3 only when its source and text tags match."""
+    from mutagen import MutagenError
+    from mutagen.mp3 import MP3
+    stem = safe_filename(f'{track.artist} - {track.title}')
+    candidates = [Path(folder) / f'{stem}.mp3']
+    candidates.extend(Path(folder).glob(glob.escape(stem) + ' ([0-9]*).mp3'))
+    expected = {'TIT2': track.title, 'TPE1': track.artist, 'TALB': track.album,
+                'TPE2': track.albumartist, 'TRCK': track.track, 'TDRC': track.year, 'TCON': track.genre}
+    video_id = source_video_id(track.url)
+    if not video_id:
+        return None
+    for candidate in candidates:
+        try:
+            if not candidate.is_file() or not candidate.stat().st_size:
+                continue
+            audio = MP3(candidate)
+            if not audio.tags or audio.info.length <= 0:
+                continue
+            tags = audio.tags
+            if not any(source_video_id(frame.url) == video_id for frame in tags.getall('WOAS')):
+                continue
+            if all(str(tags.get(key, '')) == value for key, value in expected.items()):
+                return candidate
+        except (OSError, ValueError, MutagenError):
+            continue
+    return None
+
+
 def download_track(track, folder, progress=lambda percent: None, *, workdir=None,
                    cookies_file=None, session_dir=None, report=lambda *_: None):
     validate_track(track)
     validate_url(track.url)
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
+    existing = matching_existing_download(track, folder)
+    if existing:
+        report('status', 'Keeping an existing download with matching source and tags.')
+        progress(100)
+        return existing, 'Existing matching download kept (including its artwork).'
     context = nullcontext(workdir) if workdir else tempfile.TemporaryDirectory(prefix='.ytd3-', dir=folder)
     with context as temporary:
         temporary = Path(temporary)

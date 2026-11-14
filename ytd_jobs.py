@@ -46,7 +46,9 @@ def _worker_main(kind, payload, folder):
                 raise ValueError('Unknown operation.')
         except Exception as exc:
             emit('error', {'message': format_error(exc),
-                           'stop_batch': isinstance(exc, DownloadFailure) and exc.stop_batch})
+                           'stop_batch': isinstance(exc, DownloadFailure) and exc.stop_batch,
+                           'video_only': isinstance(exc, DownloadFailure) and exc.video_only,
+                           'needs_sign_in': isinstance(exc, DownloadFailure) and exc.needs_sign_in})
 
 
 class WorkerJob:
