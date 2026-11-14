@@ -1,382 +1,267 @@
-import sys
-import requests
-import urllib.parse as urlparse
+"""Windows desktop entry point. Run with Python or build with build_windows.bat."""
+from copy import deepcopy
+from pathlib import Path
+import json
 import os
-import re
-import subprocess
-from pytubefix import YouTube, Playlist
-from tqdm import tqdm
-from colorama import Fore, Style, init
-from pydub import AudioSegment
-from mutagen.easyid3 import EasyID3
-from mutagen.id3 import ID3, APIC, TPE2, TSSE, TENC
-
-init(autoreset=True)
-Download_DIR = r'C:\Users\vague\OneDrive\Escritorio\YTD'
-link = input("Enter YouTube URL: ")
-mp3_path = "song.mp3"
-
-progress_bar = None
-
-class Log:
-    @staticmethod
-    def info(msg):
-        print(Fore.CYAN + msg + Style.RESET_ALL)
-
-    @staticmethod
-    def success(msg):
-        print(Fore.GREEN + msg + Style.RESET_ALL)
-
-    @staticmethod
-    def warn(msg):
-        print(Fore.YELLOW + "WARN: " + Style.RESET_ALL + msg)
-
-    @staticmethod
-    def error(msg):
-        print(Fore.RED + "ERROR: " + Style.RESET_ALL + msg)
-
-    @staticmethod
-    def action(msg):
-        print(Fore.LIGHTWHITE_EX + ">> " + Style.RESET_ALL + msg)
-
-
-def convert_to_mp3(file_path):
-    mp3_path = os.path.splitext(file_path)[0] + ".mp3"
-    audio = AudioSegment.from_file(file_path)
-    audio.export(mp3_path, format="mp3", parameters=["-codec:a","libmp3lame","-q:a","0"])
-    os.remove(file_path)
-    return mp3_path
-
-
-def progress_function(stream, chunk, bytes_remaining):
-    global progress_bar
-    if progress_bar:
-        progress_bar.update(len(chunk))
-
-
-def complete_function(stream, file_path):
-    global progress_bar
-    if progress_bar:
-        progress_bar.close()
-        progress_bar = None
-
-
-def is_video_url(url):
-    return "watch?v=" in url or "youtu.be/" in url
-
-
-def get_list_id(url):
-    query = urlparse.urlparse(url).query
-    params = urlparse.parse_qs(query)
-    return params.get("list", [None])[0]
-
-
-def apply_track_replaygain(mp3_path):
-    cmd = ["ffmpeg", "-y", "-i", mp3_path, "-af",
-           "replaygain", "-vn", "-acodec", "copy",
-           mp3_path + ".rg.mp3"
-           ]
-    subprocess.run(cmd,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                   )
-
-
-def split_artist_from_title(title):
-    separators = [" - ", " – ", " — ", " : ", "|"]
-    for sep in separators:
-        if sep not in title:
-            continue
-        left, right = title.split(sep, 1)
-        artist = left.strip()
-        track = right.strip()
-
-        track = re.sub(r'\(.*?\)', '', track)
-        track = re.sub(r'\[.*?\]', '', track)
-        track = track.strip()
-
-        if len(artist) < 2 or len(track) < 2:
-            continue
-        return artist, track
-    return None, None
-
-
-def clean_artist_name(name):
-    if not name:
-        return None
-    name = name.strip()
-    if name.lower().endswith(" - topic"):
-        name = name[:-8].strip()
-    return name
-
-
-def clean_album_name(name, artist):
-    if not name:
-        return None
-
-    if artist:
-        artist_re = re.escape(artist)
-        name = re.sub(
-            rf'^{artist_re}\s*[-–—:|.]\s*',
-            '',
-            name,
-            flags=re.I
-        )
-
-    name = re.sub(r'^-\s+', '', name)
-    return name.strip()
-
-
-def normalize_album_name(name):
-    if not name:
-        return None
-
-    name = re.sub(r'\(.*?\)|\[.*?\]', '', name)
-    name = re.sub(
-        r'\b(full\s*)?(album|ep|lp|official|playlist)\b',
-        '',
-        name,
-        flags=re.I
-    )
-    name = re.sub(r'\s+', ' ', name).strip()
-    name = re.sub(r'^-\s+', '', name)
-
-    return name or None
-
-
-def derive_playlist_album(pl):
-
-    playlist_artist = clean_artist_name(pl.videos[0].author) if pl.videos else None
-    album = clean_album_name(pl.title, playlist_artist)
-    album = normalize_album_name(album)
-
-    if not album:
-        return "Unknown Album"
-
-    return album
-
-
-def safe_filename(name):
-
-    if not name:
-        return ""
-
-    return "".join(
-        "꞉" if c == ":" else "_" if c in r'<>"/\|?*' else c
-        for c in name
-    ).strip()
-
-
-def normalize_title(title):
-    if not title:
-        return title
-    return re.sub(
-        r'\s*(official|lyrics?|video|audio|mv)\s*',
-        '',
-        title,
-        flags=re.I
-    ).strip()
-
-
-def force_strip_artist_prefix(title, artist):
-    if not title or not artist:
-        return title
-
-    artist_re = re.escape(artist)
-    pattern = rf'^{artist_re}\s*[-–—:|]\s*'
-    return re.sub(pattern, '', title, flags=re.I).strip()
-
-
-def clean_track_title(title):
-    if not title:
-        return title
-
-    title = re.sub(r'\(.*?\)|\[.*?\]', '', title)
-    title = re.sub(r'\.{2,}', '.', title)
-    title = re.sub(r'\s+', ' ', title)
-    return title.strip(" .-_–—:")
-
-
-def resolve_metadata(yt, *, album, track, artist_hint=None):
-    raw_artist = clean_artist_name(artist_hint or yt.author)
-
-    title = normalize_title(yt.title)
-    split_artist, split_title = split_artist_from_title(title)
-
-    if split_artist and split_title:
-        final_artist = clean_artist_name(split_artist)
-        final_title = split_title
-    else:
-        final_artist = raw_artist
-        final_title = force_strip_artist_prefix(title, final_artist)
-
-    final_title = clean_track_title(final_title)
-
-    return {
-        "artist": final_artist,
-        "title": final_title,
-        "album": album,
-        "track": track,
-    }
-
-
-def add_id3_tags(mp3_path, metadata, yt):
-    try:
-        tags = EasyID3(mp3_path)
-    except Exception:
-        tags = EasyID3()
-        tags.save(mp3_path)
-        tags = EasyID3(mp3_path)
-    tags["title"] = metadata["title"]
-    tags["artist"] = metadata["artist"]
-    tags["albumartist"] = metadata["artist"]
-
-    if metadata.get("album"):
-        tags["album"] = metadata["album"]
-    if metadata.get("track"):
-        tags["tracknumber"] = str(metadata["track"])
-    tags.save()
-    audio = ID3(mp3_path)
-
-    if "TPE2" in audio:
-        del audio["TPE2"]
-    audio["TPE2"] = TPE2(encoding=3,text=[metadata["artist"]])
-    audio["TENC"] = TENC(encoding=3, text=["libmp3lame"])
-    audio["TSSE"] = TSSE(encoding=3, text=["V0 (VBR)"])
-
-    thumb_url = f"https://img.youtube.com/vi/{yt.video_id}/maxresdefault.jpg"
-    response = requests.get(thumb_url)
-
-    if response.status_code != 200 or "image" not in response.headers.get("content-type", ""):
-        thumb_url = f"https://img.youtube.com/vi/{yt.video_id}/hqdefault.jpg"
-        response = requests.get(thumb_url)
-
-    if response.status_code != 200 or "image" not in response.headers.get("content-type", ""):
-        thumb_url = f"https://img.youtube.com/vi/{yt.video_id}/sddefault.jpg"
-        response = requests.get(thumb_url)
-
-    img = response.content
-    mime = response.headers.get("content-type", "image/jpeg")
-
-    for key in list(audio.keys()):
-        if key.startswith("APIC"):
-            del audio[key]
-
-    audio.add(APIC(
-        encoding=3,mime=mime,type=3,desc="Cover",data=img
-    ))
-    audio.save(v2_version=3)
-
-
-playlist_prefixes = ("PL", "UU", "OL")
-list_id = get_list_id(link)
-is_playlist = (
-    list_id is not None
-    and any(list_id.startswith(prefix) for prefix in playlist_prefixes)
-)
-
-
-# ==============================================================
-# PLAYLIST MODE
-# ==============================================================
-if is_playlist:
-    Log.success("\nDetected: PLAYLIST\n")
-    pl = Playlist(link)
-    Log.info(f"Playlist Title: {pl.title}")
-
-    playlist_artist = clean_artist_name(pl.videos[0].author) if pl.videos else None
-
-    raw_album = clean_album_name(pl.title, playlist_artist)
-    album_name = derive_playlist_album(pl)
-
-
-    playlist_folder = os.path.join(
-        Download_DIR,
-        safe_filename(album_name)
-    )
-    os.makedirs(playlist_folder, exist_ok=True)
-
-    playlist_folder = os.path.join(Download_DIR, safe_filename(album_name))
-    os.makedirs(playlist_folder, exist_ok=True)
-
-    Log.info(f"Songs in playlist: {len(pl.videos)}\n")
-
-    for track_number, yt in enumerate(pl.videos, start=1):
-        tqdm.write(Fore.LIGHTWHITE_EX + f"\n>> Downloading {track_number}: {yt.title}" + Style.RESET_ALL)
-
-        progress_bar = None
-        audio_streams = yt.streams.filter(only_audio=True)
-        opus_streams = [s for s in audio_streams if "webm" in s.mime_type]
-        if opus_streams:
-            best_stream = max(opus_streams, key=lambda s: s.filesize or 0)
+import queue
+import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import webbrowser
+
+from ytd_core import preview, download_track, validate_track
+
+FIELDS = [('title', 'Title'), ('artist', 'Artist'), ('album', 'Album'),
+          ('albumartist', 'Album artist'), ('track', 'Track number'),
+          ('year', 'Year'), ('genre', 'Genre'), ('artwork', 'Artwork URL')]
+
+
+def settings_path():
+    return Path(os.environ.get('APPDATA', str(Path.home()))) / 'YTD3' / 'settings.json'
+
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title('YTD3 — Song downloader')
+        self.root.geometry('1040x750')
+        self.root.minsize(850, 650)
+        self.events = queue.Queue()
+        self.tracks = []
+        self.current = None
+        self.busy = False
+        self.loading_fields = False
+        self.close_after = False
+        self.url = tk.StringVar()
+        self.folder = tk.StringVar(value=str(Path.home() / 'Music' / 'YTD3'))
+        self.album_mode = tk.BooleanVar()
+        self.status = tk.StringVar(value='Paste a link, then preview and edit its song details.')
+        self.values = {key: tk.StringVar() for key, _ in FIELDS}
+        try:
+            saved = json.loads(settings_path().read_text(encoding='utf-8'))
+            if isinstance(saved.get('folder'), str):
+                self.folder.set(saved['folder'])
+        except (OSError, ValueError, AttributeError):
+            pass
+        self.build()
+        for variable in self.values.values():
+            variable.trace_add('write', self.edit)
+        root.protocol('WM_DELETE_WINDOW', self.close)
+        root.after(100, self.poll)
+
+    def build(self):
+        style = ttk.Style()
+        if 'vista' in style.theme_names():
+            style.theme_use('vista')
+        panel = ttk.Frame(self.root, padding=18)
+        panel.pack(fill='both', expand=True)
+        ttk.Label(panel, text='YTD3', font=('Segoe UI', 24, 'bold')).pack(anchor='w')
+        ttk.Label(panel, text='Preview your songs. Make the details yours. Save as MP3.').pack(anchor='w', pady=(0, 14))
+        link_row = ttk.Frame(panel)
+        link_row.pack(fill='x')
+        self.url_entry = ttk.Entry(link_row, textvariable=self.url)
+        self.url_entry.pack(side='left', fill='x', expand=True)
+        self.preview_button = ttk.Button(link_row, text='Preview link', command=self.load)
+        self.preview_button.pack(side='left', padx=(8, 0))
+        self.mode_check = ttk.Checkbutton(panel, text='Treat playlist as an album (use playlist title and track order)', variable=self.album_mode)
+        self.mode_check.pack(anchor='w', pady=8)
+        middle = ttk.Frame(panel)
+        middle.pack(fill='both', expand=True)
+        left = ttk.Frame(middle)
+        left.pack(side='left', fill='both', expand=True, padx=(0, 16))
+        self.tree = ttk.Treeview(left, columns=('artist',), selectmode='browse', height=10)
+        self.tree.heading('#0', text='Song')
+        self.tree.heading('artist', text='Artist')
+        self.tree.column('#0', width=235, minwidth=120)
+        self.tree.column('artist', width=140, minwidth=90)
+        scrollbar = ttk.Scrollbar(left, orient='vertical', command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side='right', fill='y')
+        self.tree.pack(fill='both', expand=True)
+        self.tree.bind('<<TreeviewSelect>>', self.select)
+        right = ttk.Frame(middle)
+        right.pack(side='left', fill='both')
+        self.entries = []
+        for row, (key, label) in enumerate(FIELDS):
+            ttk.Label(right, text=label).grid(row=row * 2, column=0, sticky='w', pady=(4, 0))
+            entry = ttk.Entry(right, textvariable=self.values[key], width=39, state='disabled')
+            entry.grid(row=row * 2 + 1, column=0, sticky='ew')
+            self.entries.append(entry)
+        self.art_button = ttk.Button(right, text='Open artwork preview', command=self.show_artwork, state='disabled')
+        self.art_button.grid(row=16, column=0, sticky='w', pady=8)
+        ttk.Label(panel, text='Automatic details are guesses. Keep Live/Remix labels and correct uploader names as needed.').pack(anchor='w', pady=(10, 8))
+        output = ttk.Frame(panel)
+        output.pack(fill='x')
+        ttk.Label(output, text='Save to:').pack(side='left', padx=(0, 8))
+        self.folder_entry = ttk.Entry(output, textvariable=self.folder)
+        self.folder_entry.pack(side='left', fill='x', expand=True)
+        self.browse_button = ttk.Button(output, text='Browse…', command=self.browse)
+        self.browse_button.pack(side='left', padx=8)
+        self.download_button = ttk.Button(output, text='Download all songs', command=self.download, state='disabled')
+        self.download_button.pack(side='left')
+        self.progress = ttk.Progressbar(panel, maximum=100)
+        self.progress.pack(fill='x', pady=(14, 6))
+        ttk.Label(panel, textvariable=self.status, wraplength=960).pack(anchor='w')
+        self.log = tk.Text(panel, height=4, wrap='word', state='disabled', font=('Segoe UI', 9))
+        self.log.pack(fill='x', pady=(6, 0))
+
+    def edit(self, *_):
+        if self.loading_fields or self.current is None or self.busy:
+            return
+        track = self.tracks[self.current]
+        for key, _ in FIELDS:
+            setattr(track, key, self.values[key].get().strip())
+        self.tree.item(str(self.current), text=track.title, values=(track.artist,))
+
+    def select(self, _=None):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        self.current = int(selected[0])
+        self.loading_fields = True
+        for key, _ in FIELDS:
+            self.values[key].set(getattr(self.tracks[self.current], key))
+        self.loading_fields = False
+        for entry in self.entries:
+            entry.configure(state='disabled' if self.busy else 'normal')
+        self.art_button.configure(state='disabled' if self.busy else 'normal')
+
+    def show_artwork(self):
+        from urllib.parse import urlparse
+        url = self.values['artwork'].get().strip()
+        if urlparse(url).scheme in ('https', 'http'):
+            webbrowser.open(url)
         else:
-            best_stream = max(audio_streams, key=lambda s: s.filesize or 0)
+            messagebox.showinfo('Artwork', 'Enter an HTTP(S) artwork image URL first.')
 
-        progress_bar = tqdm(
-            total=best_stream.filesize,
-            unit="B",
-            unit_scale=True,
-            desc=yt.title[:40],
-            leave=True,
-        )
+    def browse(self):
+        folder = filedialog.askdirectory(title='Choose where to save MP3 files')
+        if folder:
+            self.folder.set(folder)
 
-        yt.register_on_progress_callback(progress_function)
-        yt.register_on_complete_callback(complete_function)
+    def set_busy(self, value):
+        self.busy = value
+        for widget in (self.preview_button, self.url_entry, self.mode_check,
+                       self.folder_entry, self.browse_button):
+            widget.configure(state='disabled' if value else 'normal')
+        self.download_button.configure(state='normal' if self.tracks and not value else 'disabled')
+        for entry in self.entries:
+            entry.configure(state='normal' if self.current is not None and not value else 'disabled')
+        self.art_button.configure(state='normal' if self.current is not None and not value else 'disabled')
 
-        file_path = best_stream.download(playlist_folder)
+    def load(self):
+        url = self.url.get().strip()
+        if not url:
+            messagebox.showinfo('YouTube link', 'Paste a video or playlist URL first.')
+            return
+        album_mode = self.album_mode.get()
+        self.set_busy(True)
+        self.progress.configure(mode='indeterminate')
+        self.progress.start()
+        self.status.set('Loading song details… Large playlists can take a while.')
 
-        safe_title = safe_filename(yt.title)
-        new_path = os.path.join(playlist_folder, safe_title + ".webm")
-        os.rename(file_path, new_path)
-        file_path = new_path
+        def worker():
+            try:
+                self.events.put(('preview', preview(url, album_mode)))
+            except Exception as exc:
+                self.events.put(('error', str(exc)))
+        threading.Thread(target=worker, daemon=True).start()
 
-        mp3_path = convert_to_mp3(file_path)
-        apply_track_replaygain(mp3_path)
-        metadata = resolve_metadata(
-            yt, album=album_name, track=track_number, artist_hint=None
-        )
-        print(metadata)
-        add_id3_tags(mp3_path,metadata, yt)
+    def download(self):
+        try:
+            for track in self.tracks:
+                validate_track(track)
+            if not self.folder.get().strip():
+                raise ValueError('Choose a destination folder.')
+        except ValueError as exc:
+            messagebox.showerror('Check song details', str(exc))
+            return
+        tracks = deepcopy(self.tracks)
+        folder = self.folder.get().strip()
+        self.set_busy(True)
+        self.progress.configure(value=0)
+        self.append_log('Starting download…')
+        try:
+            path = settings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({'folder': folder}), encoding='utf-8')
+        except OSError:
+            self.append_log('Could not remember the output folder for next time.')
 
-    Log.success("\nPlaylist downloaded and converted to MP3 with track info\n")
+        def worker():
+            completed = 0
+            for index, track in enumerate(tracks, 1):
+                self.events.put(('status', f'{index}/{len(tracks)}: {track.title} — downloading, then converting and tagging…'))
+                try:
+                    path, warning = download_track(track, folder, lambda p: self.events.put(('progress', p)))
+                    completed += 1
+                    self.events.put(('log', f'Saved: {path}'))
+                    if warning:
+                        self.events.put(('log', warning))
+                except Exception as exc:
+                    self.events.put(('log', f'Failed: {track.title}: {exc}'))
+            self.events.put(('done', f'Finished: {completed} saved, {len(tracks) - completed} failed. See the log for details.'))
+        threading.Thread(target=worker, daemon=True).start()
 
-# ==============================================================
-# SINGLE VIDEO MODE
-# ==============================================================
-elif is_video_url(link):
-    Log.success("\nDetected: single video\n")
-    yt = YouTube(link)
-    Log.info(f"Title: {yt.title}")
+    def append_log(self, message):
+        self.log.configure(state='normal')
+        self.log.insert('end', message + '\n')
+        self.log.see('end')
+        self.log.configure(state='disabled')
 
-    audio_streams = yt.streams.filter(only_audio=True)
-    opus_streams = [s for s in audio_streams if "webm" in s.mime_type]
-    if opus_streams:
-        best_stream = max(opus_streams, key=lambda s: s.filesize or 0)
-    else:
-        best_stream = max(audio_streams, key=lambda s: s.filesize or 0)
+    def poll(self):
+        try:
+            while True:
+                kind, data = self.events.get_nowait()
+                if kind == 'preview':
+                    self.progress.stop()
+                    self.progress.configure(mode='determinate', value=0)
+                    self.tracks = data
+                    self.current = None
+                    self.tree.delete(*self.tree.get_children())
+                    for index, track in enumerate(data):
+                        self.tree.insert('', 'end', iid=str(index), text=track.title, values=(track.artist,))
+                    self.set_busy(False)
+                    self.tree.selection_set('0')
+                    self.status.set(f'{len(data)} song(s) loaded. Select each song to review its details.')
+                elif kind == 'error':
+                    self.progress.stop()
+                    self.progress.configure(mode='determinate', value=0)
+                    self.set_busy(False)
+                    self.status.set('Could not load this link. Check the URL and your connection, then retry.')
+                    messagebox.showerror('Preview failed', data)
+                elif kind == 'progress':
+                    self.progress.configure(value=data)
+                elif kind == 'status':
+                    self.progress.configure(value=0)
+                    self.status.set(data)
+                elif kind == 'log':
+                    self.append_log(data)
+                elif kind == 'done':
+                    self.set_busy(False)
+                    self.progress.configure(value=100)
+                    self.status.set(data)
+                    self.append_log(data)
+                    if self.close_after:
+                        self.root.destroy()
+                        return
+        except queue.Empty:
+            pass
+        if self.close_after and not self.busy:
+            self.root.destroy()
+            return
+        self.root.after(100, self.poll)
 
-    progress_bar = tqdm(
-        total=best_stream.filesize,
-        unit="B",
-        unit_scale=True,
-        desc=yt.title[:40],
-        leave=True
-    )
+    def close(self):
+        if self.busy:
+            if messagebox.askyesno('Work in progress', 'Wait for this operation to finish, then close automatically?'):
+                self.close_after = True
+                self.status.set('Will close when the current operation finishes.')
+        else:
+            self.root.destroy()
 
-    yt.register_on_progress_callback(progress_function)
-    yt.register_on_complete_callback(complete_function)
 
-    file_path = best_stream.download(Download_DIR)
-    mp3_path = convert_to_mp3(file_path)
-    apply_track_replaygain(mp3_path)
-
-    metadata = resolve_metadata(
-        yt, album=None, track=None, artist_hint=yt.author
-    )
-    add_id3_tags(mp3_path, metadata, yt)
-
-    Log.success("Converted to MP3 with track info\n")
-    Log.success("Download complete!")
-
-else:
-    Log.error("Invalid link")
-    sys.exit(1)
+if __name__ == '__main__':
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
