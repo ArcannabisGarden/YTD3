@@ -1,8 +1,9 @@
 """Metadata, extraction, conversion, and tagging without desktop dependencies."""
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import glob
+import io
 import os
 import re
 import shutil
@@ -25,6 +26,7 @@ class Track:
     year: str = ''
     genre: str = ''
     artwork: str = ''
+    edited_fields: list[str] = field(default_factory=list)
 
 
 def clean_title(title):
@@ -34,13 +36,43 @@ def clean_title(title):
     return re.sub(r'\s+', ' ', title).strip()
 
 
+def clean_artist_name(name):
+    return re.sub(r'\s*-\s*Topic$', '', name or '', flags=re.I).strip()
+
+
+def force_strip_artist_prefix(title, artist):
+    if not artist:
+        return title
+    return re.sub(r'^' + re.escape(artist) + r'\s*[-–—:|]\s*', '', title, flags=re.I).strip()
+
+
+def clean_track_title(title):
+    title = re.sub(r'\s+', ' ', clean_title(title or '')).strip()
+    # Remove isolated boundary separators, while retaining genuine punctuation
+    # such as -Human, Love-Hate, or Fine Again - Acoustic.
+    title = re.sub(r'^(?:[-–—_:|]\s+)+', '', title)
+    return re.sub(r'(?:\s+[-–—_:|])+$', '', title).strip()
+
+
+def split_artist_from_title(title):
+    for separator in (' - ', ' – ', ' — ', ' : ', '|'):
+        if separator in title:
+            artist, track = title.split(separator, 1)
+            if artist.strip() and clean_track_title(track):
+                return clean_artist_name(artist), clean_track_title(track)
+    return None, None
+
+
 def guess_metadata(title, author):
-    artist = re.sub(r'\s*-\s*Topic$', '', author, flags=re.I).strip()
+    artist = clean_artist_name(author)
     title = clean_title(title)
-    pieces = re.split(r'\s+[-–—]\s+', title, maxsplit=1)
-    if len(pieces) == 2 and all(pieces):
-        artist, title = pieces
-    return title, artist
+    stripped = force_strip_artist_prefix(title, artist)
+    if stripped != title or re.search(r'\s*-\s*Topic$', author or '', re.I):
+        return clean_track_title(stripped), artist
+    split_artist, split_title = split_artist_from_title(title)
+    if split_artist:
+        return split_title, split_artist
+    return clean_track_title(title), artist
 
 
 def validate_url(url):
@@ -148,17 +180,27 @@ def track_from_info(info, *, album='', number='', albumartist=''):
     guessed_title, guessed_artist = guess_metadata(
         info.get('title') or 'Untitled', info.get('channel') or info.get('uploader') or 'Unknown Artist')
     artists = info.get('artists') or []
-    artist = info.get('artist') or ', '.join(artists) or guessed_artist
+    supplied_artist = info.get('artist') or ', '.join(artists)
+    artist = clean_artist_name(supplied_artist or guessed_artist)
+    if info.get('track') or supplied_artist:
+        # Structured fields can still contain "seether - Gasoline". Apply the
+        # original prefix cleanup here too, before the user reviews the tags.
+        title = clean_track_title(force_strip_artist_prefix(
+            clean_title(info.get('track') or info.get('title') or 'Untitled'), artist))
+    else:
+        title = guessed_title
     thumbnails = info.get('thumbnails') or []
     artwork = info.get('thumbnail') or (thumbnails[-1].get('url', '') if thumbnails else '')
     number_value = info.get('track_number') or number
     video_id = info.get('id') or ''
+    if not artwork and video_id:
+        artwork = f'https://img.youtube.com/vi/{video_id}/maxresdefault.jpg'
     url = info.get('webpage_url') or info.get('url') or ''
     if urlparse(url).hostname not in ('www.youtube.com', 'youtube.com', 'music.youtube.com', 'youtu.be'):
         url = f'https://www.youtube.com/watch?v={video_id}'
     return Track(
-        url=url, video_id=video_id, title=info.get('track') or guessed_title,
-        artist=artist, album=info.get('album') or album,
+        url=url, video_id=video_id, title=title,
+        artist=artist, album=clean_album_name(info.get('album') or album, artist),
         albumartist=info.get('album_artist') or albumartist,
         track=str(number_value) if number_value else '',
         year=str(info.get('release_year') or '') or str(info.get('release_date') or '')[:4],
@@ -168,17 +210,19 @@ def track_from_info(info, *, album='', number='', albumartist=''):
 
 def clean_album_name(title, artist=''):
     if artist:
-        title = re.sub(r'^' + re.escape(artist) + r'\s*[-–—:]\s*', '', title, flags=re.I)
-    return re.sub(r'\s*[\[(](?:full album|official album)[\])]\s*', ' ', title, flags=re.I).strip()
+        title = re.sub(r'^' + re.escape(artist) + r'\s*[-–—:|.]\s*', '', title, flags=re.I)
+    title = re.sub(r'\s*[\[(](?:full album|official album|official|playlist|ep|lp)[\])]\s*', ' ', title, flags=re.I)
+    title = re.sub(r'\s+[-–—|:]\s*(?:full album|official album|official playlist|playlist|ep|lp)$', '', title, flags=re.I)
+    return clean_track_title(title)
 
 
-def preview(url, album_mode='Auto', *, cookies_file=None, workdir=None, report=lambda *_: None):
+def preview(url, album_mode='Album', *, cookies_file=None, workdir=None, report=lambda *_: None):
     from yt_dlp import YoutubeDL
     parsed = validate_url(url)
     playlist_id = parse_qs(parsed.query).get('list', [''])[0]
     playlist = bool(playlist_id)
     album_mode = {True: 'Album', False: 'Mixed playlist'}.get(album_mode, album_mode)
-    treat_as_album = album_mode == 'Album' or (album_mode == 'Auto' and is_album_playlist(url))
+    treat_as_album = playlist and (album_mode == 'Album' or (album_mode == 'Auto' and is_album_playlist(url)))
     context = nullcontext(workdir) if workdir else tempfile.TemporaryDirectory(prefix='ytd3-preview-')
     with context as temporary:
         options = extractor_options(temporary, cookies_file, report)
@@ -201,7 +245,7 @@ def preview(url, album_mode='Auto', *, cookies_file=None, workdir=None, report=l
         report('warning', f'{len(entries) - len(usable)} unavailable playlist item(s) were skipped; original track positions are kept.')
     if not usable:
         raise ValueError('No available songs were found in this link.')
-    album = info.get('album') or clean_album_name(info.get('title') or '') if treat_as_album else ''
+    album = (info.get('album') or clean_album_name(info.get('title') or '') or 'Unknown Album') if treat_as_album else ''
     tracks = []
     for index, entry in enumerate(entries, 1):
         if entry not in usable:
@@ -211,9 +255,10 @@ def preview(url, album_mode='Auto', *, cookies_file=None, workdir=None, report=l
     if treat_as_album:
         artists = {track.artist for track in tracks}
         albumartist = tracks[0].artist if len(artists) == 1 else 'Various Artists'
+        album_hint = info.get('album_artist') or clean_artist_name(usable[0].get('channel')) or tracks[0].artist
         for track in tracks:
             track.albumartist = track.albumartist or albumartist
-            track.album = clean_album_name(track.album, albumartist)
+            track.album = clean_album_name(track.album, album_hint) or 'Unknown Album'
     return tracks
 
 
@@ -235,7 +280,7 @@ def validate_track(track):
 
 
 def safe_filename(value):
-    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', value).strip(' .')[:150].rstrip(' .')
+    value = re.sub(r'[<>"/\\|?*\x00-\x1f]', '_', value.replace(':', '꞉')).strip(' .')[:150].rstrip(' .')
     if not value:
         value = 'Untitled'
     if re.fullmatch(r'(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?', value, re.I):
@@ -269,32 +314,93 @@ def convert(source, destination):
         raise RuntimeError('Audio conversion produced an empty file.')
 
 
-def write_tags(path, track):
-    from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TRCK, TDRC, TCON, APIC, WOAS
-    tags = ID3()
-    for frame, value in ((TIT2, track.title), (TPE1, track.artist),
-                         (TPE2, track.albumartist), (TALB, track.album),
-                         (TRCK, track.track), (TDRC, track.year), (TCON, track.genre)):
-        if value:
-            tags.add(frame(encoding=3, text=[value]))
-    tags.add(WOAS(url=track.url))
-    warning = ''
-    if track.artwork:
+def artwork_as_jpeg(data):
+    from PIL import Image, ImageOps
+    with Image.open(io.BytesIO(data), formats=('JPEG', 'PNG', 'WEBP', 'GIF', 'AVIF', 'BMP', 'TIFF')) as image:
+        if image.width * image.height > 40_000_000:
+            raise ValueError('Artwork exceeds 40 million pixels.')
+        image.seek(0)
+        image = ImageOps.exif_transpose(image)
+        image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+        if image.mode in ('RGBA', 'LA') or 'transparency' in image.info:
+            rgba = image.convert('RGBA')
+            rgb = Image.new('RGB', rgba.size, 'white')
+            rgb.paste(rgba, mask=rgba.getchannel('A'))
+        else:
+            rgb = image.convert('RGB')
+        output = io.BytesIO()
+        rgb.save(output, 'JPEG', quality=95, optimize=True)
+        return output.getvalue()
+
+
+def artwork_urls(track):
+    urls = [track.artwork] if track.artwork else []
+    hostname = urlparse(track.artwork).hostname or ''
+    if hostname == 'img.youtube.com' or hostname.endswith('.ytimg.com'):
+        video_id = source_video_id(track.url) or track.video_id
+        for quality in ('maxresdefault', 'hqdefault', 'sddefault'):
+            url = f'https://img.youtube.com/vi/{video_id}/{quality}.jpg'
+            if url not in urls:
+                urls.append(url)
+    return urls
+
+
+def fetch_artwork(track):
+    failure = None
+    for url in artwork_urls(track):
         try:
-            request = Request(track.artwork, headers={'User-Agent': 'YTD3/0.3'})
+            request = Request(url, headers={'User-Agent': 'YTD3/0.3.2'})
             with urlopen(request, timeout=15) as response:
                 data = response.read(10 * 1024 * 1024 + 1)
             if len(data) > 10 * 1024 * 1024:
                 raise ValueError('Image exceeds 10 MB.')
-            if data.startswith(b'\xff\xd8\xff'):
-                mime = 'image/jpeg'
-            elif data.startswith(b'\x89PNG\r\n\x1a\n'):
-                mime = 'image/png'
-            else:
-                raise ValueError('Artwork is not a JPEG or PNG image.')
-            tags.add(APIC(encoding=3, mime=mime, type=3, desc='Cover', data=data))
+            # Decode actual image bytes, including WebP; do not rely on the
+            # URL extension or Content-Type. Embed JPEG for player support.
+            return artwork_as_jpeg(data)
         except Exception as exc:
-            warning = f'Artwork skipped: {format_error(exc)}'
+            failure = exc
+    raise ValueError('Could not obtain usable artwork: ' + format_error(failure))
+
+
+def write_tags(path, track, *, encoded=True, preserve_empty_artwork=False):
+    from mutagen.id3 import (ID3, ID3NoHeaderError, TIT2, TPE1, TPE2, TALB,
+                            TRCK, TDRC, TCON, APIC, WOAS, WXXX, TENC, TSSE)
+    try:
+        tags = ID3(path)
+    except ID3NoHeaderError:
+        tags = ID3()
+    for frame, value in ((TIT2, track.title), (TPE1, track.artist),
+                         (TPE2, track.albumartist), (TALB, track.album),
+                         (TRCK, track.track), (TDRC, track.year), (TCON, track.genre)):
+        tags.delall(frame.__name__)
+        if value:
+            tags.add(frame(encoding=3, text=[value]))
+    tags.delall('WOAS')
+    tags.add(WOAS(url=track.url))
+    if encoded:
+        tags.add(TENC(encoding=3, text=['libmp3lame']))
+        tags.add(TSSE(encoding=3, text=['FFmpeg / libmp3lame V0 (VBR)']))
+    warning = ''
+    cover_key = 'WXXX:YTD3 cover source'
+    if track.artwork:
+        covers = [cover for cover in tags.getall('APIC') if cover.type == 3]
+        cached_source = tags.get(cover_key)
+        cached = (cached_source and cached_source.url == track.artwork and covers
+                  and covers[0].mime == 'image/jpeg' and covers[0].data.startswith(b'\xff\xd8\xff'))
+        if not cached:
+            try:
+                data = fetch_artwork(track)
+                tags.delall('APIC')
+                tags.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=data))
+                tags.add(WXXX(encoding=3, desc='YTD3 cover source', url=track.artwork))
+            except Exception as exc:
+                warning = f'Artwork skipped: {format_error(exc)}'
+                if covers:
+                    warning += ' Existing cover kept.'
+    elif not preserve_empty_artwork:
+        tags.delall('APIC')
+        tags.delall(cover_key)
+    # Keep unrelated user frames (lyrics, ratings, ReplayGain, comments, etc.).
     tags.save(path, v2_version=3)
     return warning
 
@@ -340,7 +446,7 @@ def _fetch_audio(url, temporary, progress, *, cookies_file, session_dir, report)
         elif data.get('status') == 'finished':
             progress(100)
 
-    options.update({'format': 'bestaudio/best', 'noplaylist': True, 'ignoreerrors': False,
+    options.update({'format': 'bestaudio[ext=webm]/bestaudio/best', 'noplaylist': True, 'ignoreerrors': False,
                     'outtmpl': str(temporary / 'source.%(ext)s'), 'overwrites': True,
                     'progress_hooks': [callback], 'nopart': False})
     report('status', 'Downloading audio…')
@@ -368,19 +474,23 @@ def source_video_id(url):
     return parse_qs(parsed.query).get('v', [''])[0]
 
 
-def matching_existing_download(track, folder):
-    """Reuse an app-created MP3 only when its source and text tags match."""
+def matching_existing_download(track, folder, *, require_matching_tags=True, search_subfolders=False):
+    """Find valid audio by source; optionally require unchanged text tags."""
     from mutagen import MutagenError
     from mutagen.mp3 import MP3
     stem = safe_filename(f'{track.artist} - {track.title}')
     candidates = [Path(folder) / f'{stem}.mp3']
     candidates.extend(Path(folder).glob(glob.escape(stem) + ' ([0-9]*).mp3'))
+    if not require_matching_tags:
+        candidates.extend(Path(folder).glob('*.mp3'))
+        if search_subfolders:
+            candidates.extend(Path(folder).rglob('*.mp3'))
     expected = {'TIT2': track.title, 'TPE1': track.artist, 'TALB': track.album,
                 'TPE2': track.albumartist, 'TRCK': track.track, 'TDRC': track.year, 'TCON': track.genre}
     video_id = source_video_id(track.url)
     if not video_id:
         return None
-    for candidate in candidates:
+    for candidate in dict.fromkeys(candidates):
         try:
             if not candidate.is_file() or not candidate.stat().st_size:
                 continue
@@ -390,27 +500,72 @@ def matching_existing_download(track, folder):
             tags = audio.tags
             if not any(source_video_id(frame.url) == video_id for frame in tags.getall('WOAS')):
                 continue
-            if all(str(tags.get(key, '')) == value for key, value in expected.items()):
+            if not require_matching_tags or all(str(tags.get(key, '')) == value for key, value in expected.items()):
                 return candidate
         except (OSError, ValueError, MutagenError):
             continue
     return None
 
 
+def album_folder(track, root):
+    return Path(root) / safe_filename(track.album) if track.album.strip() else Path(root)
+
+
+def merge_existing_metadata(track, existing):
+    from mutagen.id3 import ID3
+    tags = ID3(existing)
+    preserved = {}
+    for field_name, frame in (('album', 'TALB'), ('albumartist', 'TPE2'), ('track', 'TRCK'),
+                              ('year', 'TDRC'), ('genre', 'TCON')):
+        unknown = not getattr(track, field_name) or (field_name == 'album' and track.album == 'Unknown Album')
+        if unknown and field_name not in track.edited_fields and tags.get(frame):
+            preserved[field_name] = str(tags[frame])
+    if preserved.get('album'):
+        preserved['album'] = clean_album_name(preserved['album'], track.artist)
+    return replace(track, **preserved)
+
+
+def update_existing_song(existing, track, destination, temporary, report):
+    updated = Path(temporary) / 'updated.mp3'
+    shutil.copy2(existing, updated)
+    report('status', 'Updating existing song details and artwork; keeping its audio…')
+    warning = write_tags(updated, track, encoded=False,
+                         preserve_empty_artwork=not track.artwork and 'artwork' not in track.edited_fields)
+    stem = safe_filename(f'{track.artist} - {track.title}')
+    if existing.parent.resolve() == destination.resolve() and re.fullmatch(
+            re.escape(stem) + r'(?: \([0-9]+\))?\.mp3', existing.name, re.I):
+        os.replace(updated, existing)
+        target = existing
+    else:
+        target = publish_file(updated, destination, stem)
+        try:
+            existing.unlink()
+        except OSError:
+            warning += '\nUpdated copy saved; the previous file could not be removed.'
+    return target, ('Existing matching download kept; tags, artwork, and album folder updated. ' + warning).strip()
+
+
 def download_track(track, folder, progress=lambda percent: None, *, workdir=None,
                    cookies_file=None, session_dir=None, report=lambda *_: None):
     validate_track(track)
     validate_url(track.url)
-    folder = Path(folder)
+    root = Path(folder)
+    folder = album_folder(track, root)
     folder.mkdir(parents=True, exist_ok=True)
-    existing = matching_existing_download(track, folder)
+    existing = matching_existing_download(track, folder, require_matching_tags=False)
+    if not existing:
+        existing = matching_existing_download(track, root, require_matching_tags=False, search_subfolders=True)
     if existing:
-        report('status', 'Keeping an existing download with matching source and tags.')
-        progress(100)
-        return existing, 'Existing matching download kept (including its artwork).'
+        track = merge_existing_metadata(track, existing)
+        folder = album_folder(track, root)
+        folder.mkdir(parents=True, exist_ok=True)
     context = nullcontext(workdir) if workdir else tempfile.TemporaryDirectory(prefix='.ytd3-', dir=folder)
     with context as temporary:
         temporary = Path(temporary)
+        if existing:
+            target, warning = update_existing_song(existing, track, folder, temporary, report)
+            progress(100)
+            return target, warning
         source = fetch_audio(track.url, temporary, progress, cookies_file=cookies_file,
                              session_dir=session_dir, report=report)
         converted = temporary / 'converted.mp3'

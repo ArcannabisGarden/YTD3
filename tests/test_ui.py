@@ -73,7 +73,7 @@ class DesktopTests(unittest.TestCase):
                   Track('https://youtu.be/b', 'b', 'Second', 'Artist', album='Album', track='2')]
         self.app.url.set('https://youtube.com/playlist?list=OLAK5uy_example')
         self.app.load()
-        self.assertEqual(self.app.job.payload['album_mode'], 'Auto')
+        self.assertEqual(self.app.job.payload['album_mode'], 'Album')
         self.app.job.events.append(('result', [asdict(track) for track in tracks]))
         self.app.poll()
         self.root.update()

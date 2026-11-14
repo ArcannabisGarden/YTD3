@@ -16,7 +16,7 @@ import webbrowser
 from ytd_core import Track, validate_track, validate_url, format_error
 from ytd_jobs import WorkerJob
 
-APP_VERSION = '0.3.1'
+APP_VERSION = '0.3.2'
 FIELDS = [('title', 'Title'), ('artist', 'Artist'), ('album', 'Album'),
           ('albumartist', 'Album artist'), ('track', 'Track number'),
           ('year', 'Year'), ('genre', 'Genre'), ('artwork', 'Artwork URL')]
@@ -48,10 +48,10 @@ class App:
         self.last_detail = ''
         self.url = tk.StringVar()
         self.folder = tk.StringVar(value=str(Path.home() / 'Music' / 'YTD3'))
-        self.album_mode = tk.StringVar(value='Auto')
+        self.album_mode = tk.StringVar(value='Album')
         self.cookies_file = ''  # Session files are never remembered in settings.
         self.session_label = tk.StringVar(value='No session file selected')
-        self.status = tk.StringVar(value='Paste a link to preview songs. Album playlists are detected automatically.')
+        self.status = tk.StringVar(value='Paste a link to preview songs. Playlists use album folders and track order by default.')
         self.values = {key: tk.StringVar() for key, _ in FIELDS}
         try:
             saved = json.loads(settings_path().read_text(encoding='utf-8'))
@@ -85,7 +85,7 @@ class App:
         self.mode_picker = ttk.Combobox(mode_row, state='readonly', width=17,
             textvariable=self.album_mode, values=['Auto', 'Album', 'Mixed playlist'])
         self.mode_picker.pack(side='left')
-        ttk.Label(mode_row, text='Auto fills album name and track order for YouTube album playlists.').pack(side='left', padx=10)
+        ttk.Label(mode_row, text='Album uses the playlist name and track order. Choose Mixed playlist for collections.').pack(side='left', padx=10)
         session = ttk.Frame(panel)
         session.pack(fill='x', pady=(0, 10))
         ttk.Label(session, text='YouTube session (optional):').pack(side='left')
@@ -118,7 +118,7 @@ class App:
             self.entries.append(entry)
         self.art_button = ttk.Button(right, text='Open artwork preview', command=self.show_artwork, state='disabled')
         self.art_button.grid(row=16, column=0, sticky='w', pady=6)
-        ttk.Label(panel, text='Review automatic details before downloading. Pause and Cancel work during preview, download, and conversion.').pack(anchor='w', pady=(10, 6))
+        ttk.Label(panel, text='Songs with an album are saved in an album subfolder. Existing app downloads can have their tags and artwork updated.').pack(anchor='w', pady=(10, 6))
         output = ttk.Frame(panel)
         output.pack(fill='x')
         ttk.Label(output, text='Save to:').pack(side='left', padx=(0, 8))
@@ -126,7 +126,7 @@ class App:
         self.folder_entry.pack(side='left', fill='x', expand=True)
         self.browse_button = ttk.Button(output, text='Browse…', command=self.browse)
         self.browse_button.pack(side='left', padx=8)
-        self.download_button = ttk.Button(output, text='Download songs', command=self.download, state='disabled')
+        self.download_button = ttk.Button(output, text='Download / update songs', command=self.download, state='disabled')
         self.download_button.pack(side='left')
         controls = ttk.Frame(panel)
         controls.pack(fill='x', pady=(10, 4))
@@ -152,7 +152,10 @@ class App:
             return
         track = self.tracks[self.current]
         for key, _ in FIELDS:
-            setattr(track, key, self.values[key].get().strip())
+            value = self.values[key].get().strip()
+            if value != getattr(track, key) and key not in track.edited_fields:
+                track.edited_fields.append(key)
+            setattr(track, key, value)
         self.update_row(self.current)
 
     def select(self, _=None):
@@ -210,7 +213,7 @@ class App:
         self.mode_picker.configure(state='disabled' if value else 'readonly')
         pending = len(self.completed) < len(self.tracks)
         self.download_button.configure(state='normal' if self.tracks and pending and not value else 'disabled',
-            text='Retry unfinished songs' if self.completed or any(self.tree.set(str(i), 'state') in ('Failed', 'Needs sign-in') for i in range(len(self.tracks))) else 'Download songs')
+            text='Retry unfinished songs' if self.completed or any(self.tree.set(str(i), 'state') in ('Failed', 'Needs sign-in') for i in range(len(self.tracks))) else 'Download / update songs')
         for entry in self.entries:
             entry.configure(state='normal' if self.current is not None and not value else 'disabled')
         self.art_button.configure(state='normal' if self.current is not None and not value else 'disabled')

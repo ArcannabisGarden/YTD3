@@ -26,6 +26,7 @@ class SilentHandler(SimpleHTTPRequestHandler):
 
 def worker_diagnostic(folder):
     from mutagen.mp3 import MP3
+    from PIL import Image
     from yt_dlp.utils import Popen
     from ytd_core import node_path, fetch_audio, convert, write_tags, Track
     folder = Path(folder)
@@ -39,24 +40,30 @@ def worker_diagnostic(folder):
     inputs = folder / 'input'
     inputs.mkdir()
     make_tone(inputs / 'tone.wav')
+    Image.new('RGBA', (64, 64), (120, 40, 20, 160)).save(inputs / 'cover.webp', 'WEBP')
     server = ThreadingHTTPServer(('127.0.0.1', 0), partial(SilentHandler, directory=str(inputs)))
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     try:
         source = fetch_audio(f'http://127.0.0.1:{server.server_port}/tone.wav', folder)
+        converted = folder / 'test.mp3'
+        convert(source, converted)
+        warning = write_tags(converted, Track('https://youtu.be/example', 'example', 'Test Song', 'Test Artist',
+                            album='Test Album', track='1', artwork=f'http://127.0.0.1:{server.server_port}/cover.webp'))
+        if warning:
+            raise RuntimeError(warning)
     finally:
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=2)
-    converted = folder / 'test.mp3'
-    convert(source, converted)
-    write_tags(converted, Track('https://youtu.be/example', 'example', 'Test Song', 'Test Artist',
-                                album='Test Album', track='1'))
     audio = MP3(converted)
     if audio.info.length < 0.4 or str(audio.tags['TALB']) != 'Test Album' or str(audio.tags['TRCK']) != '1':
         raise RuntimeError('Audio or metadata round trip failed.')
+    cover = audio.tags.getall('APIC')
+    if not cover or cover[0].mime != 'image/jpeg' or not cover[0].data.startswith(b'\xff\xd8\xff'):
+        raise RuntimeError('WebP artwork was not embedded as a JPEG cover.')
     return {'worker': True, 'node': output.strip(), 'javascript_components': True,
-            'local_http_download': True, 'conversion': True, 'metadata': True}
+            'local_http_download': True, 'conversion': True, 'metadata': True, 'webp_cover_as_jpeg': True}
 
 
 def run_self_test(report_path):

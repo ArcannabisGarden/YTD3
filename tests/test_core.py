@@ -1,4 +1,5 @@
 from dataclasses import asdict
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -53,7 +54,7 @@ class CoreTests(unittest.TestCase):
 
     def test_windows_filenames(self):
         self.assertEqual(core.safe_filename('CON'), '_CON')
-        self.assertEqual(core.safe_filename('a/b:c? '), 'a_b_c_')
+        self.assertEqual(core.safe_filename('a/b:c? '), 'a_b꞉c_')
         self.assertEqual(core.safe_filename('...'), 'Untitled')
         self.assertLessEqual(len(core.safe_filename('x' * 500)), 150)
 
@@ -133,13 +134,13 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             with patch('ytd_core.fetch_audio', side_effect=audio) as fetch:
                 first, _ = core.download_track(track, folder)
-                original = first.read_bytes()
+                original = first.read_bytes()[MP3(first).info.frame_offset:]
                 second, message = core.download_track(track, folder)
                 fetch.assert_called_once()
             self.assertEqual(first, second)
-            self.assertEqual(first.read_bytes(), original)
+            self.assertEqual(first.read_bytes()[MP3(first).info.frame_offset:], original)
             self.assertIn('Existing matching download kept', message)
-            self.assertEqual(len(list(Path(folder).iterdir())), 1)
+            self.assertEqual(len(list(Path(folder).rglob('*.mp3'))), 1)
 
     def test_existing_file_must_match_source_tags_and_valid_audio(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -199,7 +200,9 @@ class CoreTests(unittest.TestCase):
             make_tone(path)
             return path
         with tempfile.TemporaryDirectory() as folder:
-            existing = Path(folder) / 'Artist - Song (Live).mp3'
+            album_folder = Path(folder) / 'My edits'
+            album_folder.mkdir()
+            existing = album_folder / 'Artist - Song (Live).mp3'
             existing.write_bytes(b'keep')
             with patch('ytd_core.fetch_audio', side_effect=audio):
                 output, warning = core.download_track(self.track(album='My edits', track='3'), folder)
@@ -208,7 +211,8 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(str(ID3(output)['TALB']), 'My edits')
             self.assertEqual(str(ID3(output)['TRCK']), '3')
             self.assertEqual(warning, '')
-            self.assertEqual(len(list(Path(folder).iterdir())), 2)
+            self.assertEqual(output.parent, album_folder)
+            self.assertEqual(len(list(album_folder.iterdir())), 2)
 
     def test_conversion_failure_leaves_no_partial_output(self):
         def audio(url, temporary, *args, **kwargs):
