@@ -1,15 +1,13 @@
-import math
+from dataclasses import asdict
 from pathlib import Path
-import struct
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
-import wave
 
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3
 import ytd_core as core
+from ytd_smoke import make_tone, worker_diagnostic
 
 
 class CoreTests(unittest.TestCase):
@@ -19,17 +17,24 @@ class CoreTests(unittest.TestCase):
         values.update(changes)
         return core.Track(**values)
 
-    def test_cleanup_preserves_meaningful_words_and_versions(self):
-        self.assertEqual(core.clean_title('Radiohead - Videotape (Live) [Official Video]'),
-                         'Radiohead - Videotape (Live)')
-        self.assertEqual(core.clean_title('Audiohead (Remix) feat. Official'),
-                         'Audiohead (Remix) feat. Official')
+    def extract_preview(self, info, url='https://youtube.com/playlist?list=OLAK5uy_example', mode='Auto'):
+        with patch('yt_dlp.YoutubeDL') as factory:
+            factory.return_value.__enter__.return_value.extract_info.return_value = info
+            tracks = core.preview(url, mode)
+        return tracks, factory.call_args.args[0]
 
-    def test_artist_guess_and_topic_channel(self):
-        self.assertEqual(core.guess_metadata('Song (Remix)', 'Artist - Topic'),
-                         ('Song (Remix)', 'Artist'))
-        self.assertEqual(core.guess_metadata('Singer – Song (Live)', 'Uploader'),
-                         ('Song (Live)', 'Singer'))
+    def playlist(self):
+        return {'title': 'Artist - Album', 'entries': [
+            {'id': 'first', 'title': 'One (Live)', 'channel': 'Artist - Topic'},
+            {'id': 'second', 'title': 'Two', 'channel': 'Artist - Topic'}]}
+
+    def test_title_cleanup_preserves_versions_and_words(self):
+        self.assertEqual(core.clean_title('Radiohead - Videotape (Live) [Official Video]'), 'Radiohead - Videotape (Live)')
+        self.assertEqual(core.clean_title('Audiohead (Remix) feat. Official'), 'Audiohead (Remix) feat. Official')
+
+    def test_artist_guess(self):
+        self.assertEqual(core.guess_metadata('Song (Remix)', 'Artist - Topic'), ('Song (Remix)', 'Artist'))
+        self.assertEqual(core.guess_metadata('Singer – Song (Live)', 'Uploader'), ('Song (Live)', 'Singer'))
 
     def test_url_validation(self):
         for url in ['file:///etc/passwd', 'https://youtube.com.evil.test/watch?v=x',
@@ -52,71 +57,88 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.safe_filename('...'), 'Untitled')
         self.assertLessEqual(len(core.safe_filename('x' * 500)), 150)
 
-    def test_duplicate_names_do_not_replace_existing_files(self):
+    def test_album_playlist_gets_album_and_track_numbers_by_default(self):
+        tracks, options = self.extract_preview(self.playlist())
+        self.assertEqual([t.album for t in tracks], ['Album', 'Album'])
+        self.assertEqual([t.track for t in tracks], ['1', '2'])
+        self.assertEqual(tracks[0].albumartist, 'Artist')
+        self.assertEqual(options['extract_flat'], 'in_playlist')
+        self.assertFalse(options['noplaylist'])
+
+    def test_mixed_playlist_does_not_invent_album_or_track(self):
+        tracks, _ = self.extract_preview(self.playlist(), mode='Mixed playlist')
+        self.assertTrue(all(not t.album and not t.track for t in tracks))
+        # Structured song metadata is still preserved in a mixed playlist.
+        info = self.playlist()
+        info['entries'][0].update(album='Real Album', track_number=4)
+        tracks, _ = self.extract_preview(info, mode='Mixed playlist')
+        self.assertEqual(tracks[0].album, 'Real Album')
+        self.assertEqual(tracks[0].track, '4')
+
+    def test_explicit_album_mode_for_regular_playlist(self):
+        tracks, _ = self.extract_preview(self.playlist(), url='https://youtube.com/playlist?list=PLexample', mode='Album')
+        self.assertEqual(tracks[1].album, 'Album')
+        self.assertEqual(tracks[1].track, '2')
+
+    def test_album_track_positions_survive_unavailable_entry(self):
+        info = self.playlist()
+        info['entries'].insert(1, {'id': 'private', 'title': '[Private video]'})
+        tracks, _ = self.extract_preview(info)
+        self.assertEqual([t.track for t in tracks], ['1', '3'])
+
+    def test_single_song_uses_structured_music_metadata(self):
+        info = dict(id='a', title='Uploader title [Official Video]', channel='Uploader',
+                    track='Actual Song (Remix)', artist='Singer', album='Real Album',
+                    track_number=7, release_year=2024, album_artist='Group')
+        tracks, options = self.extract_preview(info, url='https://youtu.be/a')
+        self.assertTrue(options['noplaylist'])
+        self.assertEqual((tracks[0].title, tracks[0].artist, tracks[0].album, tracks[0].track, tracks[0].year),
+                         ('Actual Song (Remix)', 'Singer', 'Real Album', '7', '2024'))
+        self.assertEqual(tracks[0].albumartist, 'Group')
+
+    def test_sabr_and_network_errors_stop_batch_and_preserve_reason(self):
+        for message in ['SABR Maximum reload attempts reached. Stream protection status: PoToken PENDING',
+                        'HTTP Error 403: Forbidden', 'Connection reset by peer', 'Read timed out']:
+            with self.subTest(message=message):
+                error = core.classify_download_error(RuntimeError(message))
+                self.assertTrue(error.stop_batch)
+                self.assertIn(message, str(error))
+        self.assertFalse(core.classify_download_error(ValueError('Video removed by uploader')).stop_batch)
+
+    def test_signed_urls_are_removed_from_logs(self):
+        error = core.format_error(RuntimeError('HTTP Error 403: https://media.example/song?token=secret'))
+        self.assertIn('HTTP Error 403', error)
+        self.assertNotIn('secret', error)
+
+    def test_session_uses_private_copy_and_bounded_retries(self):
         with tempfile.TemporaryDirectory() as folder:
-            first = Path(folder) / 'Artist - Song.mp3'
-            first.write_bytes(b'keep')
-            self.assertEqual(core.available_path(folder, 'Artist - Song').name, 'Artist - Song (2).mp3')
-            self.assertEqual(first.read_bytes(), b'keep')
-
-    def test_playlist_album_is_opt_in(self):
-        videos = [SimpleNamespace(title='A - One', author='Uploader', watch_url='https://youtu.be/1',
-                                  video_id='1', thumbnail_url='https://example.com/1.jpg'),
-                  SimpleNamespace(title='B - Two', author='Uploader', watch_url='https://youtu.be/2',
-                                  video_id='2', thumbnail_url='https://example.com/2.jpg')]
-        playlist = SimpleNamespace(title='Collection', video_urls=[v.watch_url for v in videos])
-        with patch('pytubefix.Playlist', return_value=playlist), \
-             patch('pytubefix.YouTube', side_effect=videos + videos) as youtube:
-            mixed = core.preview('https://youtube.com/playlist?list=arbitrary')
-            album = core.preview('https://youtube.com/playlist?list=arbitrary', album_mode=True)
-        self.assertEqual(youtube.call_count, 4)
-        self.assertTrue(all(call.kwargs['client'] == 'WEB' for call in youtube.call_args_list))
-        self.assertTrue(all(not t.album and not t.track for t in mixed))
-        self.assertEqual(album[1].track, '2')
-        self.assertEqual(album[0].albumartist, 'Various Artists')
-        self.assertEqual(album[0].album, 'Collection')
-
-    def test_single_song_preview_uses_web_verification(self):
-        video = SimpleNamespace(title='Song', author='Artist', watch_url='https://youtu.be/a',
-                                video_id='a', thumbnail_url='https://example.com/cover.jpg')
-        with patch('pytubefix.YouTube', return_value=video) as youtube:
-            tracks = core.preview(video.watch_url)
-        youtube.assert_called_once_with(video.watch_url, client='WEB')
-        self.assertEqual(tracks[0].title, 'Song')
-
-    def test_bot_block_has_actionable_message(self):
-        from pytubefix.exceptions import BotDetection
-        error = BotDetection('example')
-        self.assertTrue(core.is_youtube_block(error))
-        self.assertIn('YouTube is asking for verification', core.format_error(error))
-        self.assertNotIn('DO NOT OPEN AN ISSUE', core.format_error(error))
-        self.assertEqual(core.format_error(ValueError('Invalid input')), 'Invalid input')
-
-    def make_tone(self, path):
-        with wave.open(str(path), 'wb') as audio:
-            audio.setparams((1, 2, 44100, 0, 'NONE', 'not compressed'))
-            audio.writeframes(b''.join(struct.pack('<h', int(10000 * math.sin(2 * math.pi * 440 * i / 44100)))
-                                       for i in range(22050)))
+            folder = Path(folder)
+            session = folder / 'original.txt'
+            session.write_text('# Netscape HTTP Cookie File\n')
+            temporary = folder / 'job'
+            temporary.mkdir()
+            options = core.extractor_options(temporary, str(session))
+            Path(options['cookiefile']).write_text('changed by downloader')
+            self.assertEqual(session.read_text(), '# Netscape HTTP Cookie File\n')
+            self.assertEqual(options['socket_timeout'], 15)
+            self.assertEqual(options['retries'], 2)
+            self.assertEqual(options['fragment_retries'], 2)
+            self.assertIn('node', options['js_runtimes'])
 
     def test_real_conversion_and_metadata_roundtrip(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / 'tone.wav'
             output = Path(folder) / 'tone.mp3'
-            self.make_tone(source)
+            make_tone(source)
             core.convert(source, output)
-            warning = core.write_tags(output, self.track(album='Album', albumartist='Group',
-                                                        track='2/12', year='2024', genre='Rock'))
-            self.assertEqual(warning, '')
+            core.write_tags(output, self.track(album='Album', albumartist='Group', track='2/12', year='2024', genre='Rock'))
             audio = MP3(output)
             self.assertGreater(audio.info.length, 0.4)
-            self.assertEqual(str(audio.tags['TIT2']), 'Song (Live)')
-            self.assertEqual(str(audio.tags['TPE2']), 'Group')
-            self.assertEqual(str(audio.tags['TRCK']), '2/12')
-            self.assertEqual(str(audio.tags['TDRC']), '2024')
+            for key, expected in [('TIT2', 'Song (Live)'), ('TPE2', 'Group'), ('TRCK', '2/12'), ('TDRC', '2024')]:
+                self.assertEqual(str(audio.tags[key]), expected)
             self.assertEqual(audio.tags.version, (2, 3, 0))
-            self.assertTrue(source.exists())
 
-    def test_artwork_failure_still_saves_metadata(self):
+    def test_artwork_failure_still_saves_tags(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'tags.mp3'
             path.write_bytes(b'')
@@ -126,44 +148,39 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(str(ID3(path)['TPE1']), 'Artist')
             self.assertFalse(ID3(path).getall('APIC'))
 
-    def test_download_failure_cleans_temporary_files(self):
-        class Stream:
-            abr = '128kbps'
-            subtype = 'wav'
-            def download(stream, output_path, filename):
-                path = Path(output_path) / filename
-                path.write_bytes(b'broken source')
-                return str(path)
-        video = SimpleNamespace(streams=SimpleNamespace(filter=lambda **_: [Stream()]))
+    def test_download_preserves_existing_files_and_user_edits(self):
+        def audio(url, temporary, *args, **kwargs):
+            path = Path(temporary) / 'source.wav'
+            make_tone(path)
+            return path
         with tempfile.TemporaryDirectory() as folder:
-            with patch('pytubefix.YouTube', return_value=video), \
+            existing = Path(folder) / 'Artist - Song (Live).mp3'
+            existing.write_bytes(b'keep')
+            with patch('ytd_core.fetch_audio', side_effect=audio):
+                output, warning = core.download_track(self.track(album='My edits', track='3'), folder)
+            self.assertEqual(existing.read_bytes(), b'keep')
+            self.assertEqual(output.name, 'Artist - Song (Live) (2).mp3')
+            self.assertEqual(str(ID3(output)['TALB']), 'My edits')
+            self.assertEqual(str(ID3(output)['TRCK']), '3')
+            self.assertEqual(warning, '')
+            self.assertEqual(len(list(Path(folder).iterdir())), 2)
+
+    def test_conversion_failure_leaves_no_partial_output(self):
+        def audio(url, temporary, *args, **kwargs):
+            path = Path(temporary) / 'source.wav'
+            make_tone(path)
+            return path
+        with tempfile.TemporaryDirectory() as folder:
+            with patch('ytd_core.fetch_audio', side_effect=audio), \
                  patch('ytd_core.convert', side_effect=RuntimeError('conversion failed')):
-                with self.assertRaises(RuntimeError):
+                with self.assertRaisesRegex(RuntimeError, 'conversion failed'):
                     core.download_track(self.track(), folder)
             self.assertEqual(list(Path(folder).iterdir()), [])
 
-    def test_download_pipeline_avoids_overwrite_and_keeps_metadata(self):
-        test = self
-        class Stream:
-            abr = '128kbps'
-            subtype = 'wav'
-            def download(stream, output_path, filename):
-                path = Path(output_path) / filename
-                test.make_tone(path)
-                return str(path)
-        video = SimpleNamespace(streams=SimpleNamespace(filter=lambda **_: [Stream()]))
+    def test_real_engine_local_http_node_and_ffmpeg(self):
         with tempfile.TemporaryDirectory() as folder:
-            existing = Path(folder) / 'Artist - Song (Live).mp3'
-            existing.write_bytes(b'original')
-            with patch('pytubefix.YouTube', return_value=video) as youtube:
-                target, warning = core.download_track(self.track(), folder)
-            self.assertEqual(youtube.call_args.kwargs['client'], 'WEB')
-            self.assertTrue(callable(youtube.call_args.kwargs['on_progress_callback']))
-            self.assertEqual(existing.read_bytes(), b'original')
-            self.assertEqual(target.name, 'Artist - Song (Live) (2).mp3')
-            self.assertEqual(str(ID3(target)['TIT2']), 'Song (Live)')
-            self.assertEqual(warning, '')
-            self.assertEqual(len(list(Path(folder).iterdir())), 2)
+            result = worker_diagnostic(folder)
+        self.assertTrue(all(result.values()))
 
 
 if __name__ == '__main__':

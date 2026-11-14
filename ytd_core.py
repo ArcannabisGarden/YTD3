@@ -1,10 +1,13 @@
-"""Download and tagging operations, independent of the desktop interface."""
+"""Metadata, extraction, conversion, and tagging without desktop dependencies."""
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 import os
 import re
+import shutil
 import subprocess
 import tempfile
+import time
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
@@ -24,7 +27,6 @@ class Track:
 
 
 def clean_title(title):
-    # Remove only complete promotional labels. Keep Live, Remix, feat., etc.
     label = r'(?:official(?: music)? (?:video|audio)|official|lyrics?|lyric video|music video|audio|video|visualizer)'
     title = re.sub(r'\s*[\[(]\s*' + label + r'\s*[\])]\s*', ' ', title, flags=re.I)
     title = re.sub(r'\s*[-–—|]\s*' + label + r'\s*$', '', title, flags=re.I)
@@ -49,54 +51,158 @@ def validate_url(url):
     return parsed
 
 
-def is_youtube_block(error):
-    from pytubefix.exceptions import BotDetection
-    return isinstance(error, BotDetection)
+def is_album_playlist(url):
+    parsed = validate_url(url)
+    return parse_qs(parsed.query).get('list', [''])[0].startswith(('OLAK5uy_', 'OL'))
+
+
+class DownloadFailure(RuntimeError):
+    def __init__(self, message, stop_batch=False):
+        super().__init__(message)
+        self.stop_batch = stop_batch
 
 
 def format_error(error):
-    if is_youtube_block(error):
-        return (
-            'YouTube is asking for verification and blocked this request. '
-            'Open the link in your browser and check that it plays on your normal connection, '
-            'then try again later. If it keeps happening, this app may need a downloader update. '
-            'Repeated retries will not resolve a YouTube block.'
+    # Preserve the underlying reason while removing signed media URLs and ANSI.
+    text = re.sub(r'\x1b\[[0-9;]*m', '', str(error))
+    if any(word in text.lower() for word in ('cookies file', 'cookie file', 'cookiejar', 'invalid cookie')):
+        return 'Could not read the session file. Select a valid Netscape-format YouTube cookies.txt file, or clear it.'
+    text = re.sub(r'https?://[^\s\]\)]+', '[request URL]', text)
+    return text[-1800:] or type(error).__name__
+
+
+def classify_download_error(error):
+    text = format_error(error)
+    lowered = text.lower()
+    if any(word in lowered for word in (
+        'not a bot', 'sign in', 'login required', 'cookies', 'http error 403', 'http error 429',
+        'potoken', 'po token', 'sabr', 'maximum', 'retry', 'retries', 'timed out', 'timeout',
+        'unable to download', 'connection', 'certificate', 'network is unreachable',
+        'no supported javascript', 'requested format is not available',
+    )):
+        return DownloadFailure(
+            'Download stopped: ' + text + '\n'
+            'If YouTube requests sign-in, use a local YouTube cookies.txt file in the session picker. '
+            'For network or stream errors, retry unfinished songs later or use a newer app build.',
+            stop_batch=True,
         )
-    return str(error)
+    return DownloadFailure(text)
 
 
-def youtube_video(url, **kwargs):
-    from pytubefix import YouTube
-    # WEB activates pytubefix's automatic PO-token support using the bundled
-    # Node runtime. Do not use use_po_token=True: it prompts on stdin, which
-    # a windowed desktop app does not have.
-    return YouTube(url, client='WEB', **kwargs)
+class QuietLogger:
+    def __init__(self, report):
+        self.report = report
+
+    def debug(self, message):
+        pass
+
+    def info(self, message):
+        pass
+
+    def warning(self, message):
+        self.report('warning', format_error(message))
+
+    def error(self, message):
+        # yt-dlp raises DownloadError with this reason; report it once there.
+        pass
 
 
-def preview(url, album_mode=False):
-    from pytubefix import Playlist
+def node_path():
+    from nodejs_wheel import executable
+    root = Path(executable.ROOT_DIR)
+    return str(root / 'node.exe' if os.name == 'nt' else root / 'bin' / 'node')
+
+
+def extractor_options(workdir, cookies_file=None, report=lambda *_: None):
+    options = {
+        'quiet': True, 'no_warnings': False, 'no_color': True,
+        'logger': QuietLogger(report), 'socket_timeout': 15,
+        'retries': 2, 'fragment_retries': 2, 'extractor_retries': 1,
+        'file_access_retries': 1, 'concurrent_fragment_downloads': 1,
+        'cachedir': False, 'js_runtimes': {'node': {'path': node_path()}},
+        'ffmpeg_location': ffmpeg_path(),
+    }
+    if cookies_file:
+        # Work on a private temporary copy; yt-dlp can update its cookie jar.
+        source = Path(cookies_file).resolve()
+        if not source.is_file():
+            raise ValueError('The selected cookies.txt file no longer exists. Select it again or clear it.')
+        cookie_copy = Path(workdir) / 'session.txt'
+        shutil.copyfile(source, cookie_copy)
+        options['cookiefile'] = str(cookie_copy)
+    return options
+
+
+def track_from_info(info, *, album='', number='', albumartist=''):
+    guessed_title, guessed_artist = guess_metadata(
+        info.get('title') or 'Untitled', info.get('channel') or info.get('uploader') or 'Unknown Artist')
+    artists = info.get('artists') or []
+    artist = info.get('artist') or ', '.join(artists) or guessed_artist
+    thumbnails = info.get('thumbnails') or []
+    artwork = info.get('thumbnail') or (thumbnails[-1].get('url', '') if thumbnails else '')
+    number_value = info.get('track_number') or number
+    video_id = info.get('id') or ''
+    url = info.get('webpage_url') or info.get('url') or ''
+    if urlparse(url).hostname not in ('www.youtube.com', 'youtube.com', 'music.youtube.com', 'youtu.be'):
+        url = f'https://www.youtube.com/watch?v={video_id}'
+    return Track(
+        url=url, video_id=video_id, title=info.get('track') or guessed_title,
+        artist=artist, album=info.get('album') or album,
+        albumartist=info.get('album_artist') or albumartist,
+        track=str(number_value) if number_value else '',
+        year=str(info.get('release_year') or '') or str(info.get('release_date') or '')[:4],
+        genre=info.get('genre') or '', artwork=artwork,
+    )
+
+
+def clean_album_name(title, artist=''):
+    if artist:
+        title = re.sub(r'^' + re.escape(artist) + r'\s*[-–—:]\s*', '', title, flags=re.I)
+    return re.sub(r'\s*[\[(](?:full album|official album)[\])]\s*', ' ', title, flags=re.I).strip()
+
+
+def preview(url, album_mode='Auto', *, cookies_file=None, workdir=None, report=lambda *_: None):
+    from yt_dlp import YoutubeDL
     parsed = validate_url(url)
-    is_playlist = bool(parse_qs(parsed.query).get('list'))
-    playlist = Playlist(url) if is_playlist else None
-    # Playlist.videos silently creates default-client YouTube objects. Build
-    # each video through the same WEB client used by single songs/downloads.
-    videos = (youtube_video(item) for item in playlist.video_urls) if playlist else [youtube_video(url)]
-    tracks = []
-    for index, video in enumerate(videos, 1):
-        title, artist = guess_metadata(video.title, video.author)
-        tracks.append(Track(
-            url=video.watch_url, video_id=video.video_id, title=title, artist=artist,
-            album=playlist.title if playlist and album_mode else '',
-            track=str(index) if playlist and album_mode else '',
-            artwork=video.thumbnail_url,
-        ))
-    if not tracks:
+    playlist_id = parse_qs(parsed.query).get('list', [''])[0]
+    playlist = bool(playlist_id)
+    album_mode = {True: 'Album', False: 'Mixed playlist'}.get(album_mode, album_mode)
+    treat_as_album = album_mode == 'Album' or (album_mode == 'Auto' and is_album_playlist(url))
+    context = nullcontext(workdir) if workdir else tempfile.TemporaryDirectory(prefix='ytd3-preview-')
+    with context as temporary:
+        options = extractor_options(temporary, cookies_file, report)
+        options.update({'extract_flat': 'in_playlist' if playlist else False, 'skip_download': True,
+                        'noplaylist': not playlist, 'ignoreerrors': False})
+        # A Music watch URL with list= explicitly means the entire playlist.
+        request_url = f'https://www.youtube.com/playlist?list={playlist_id}' if playlist else url
+        report('status', 'Reading playlist details…' if playlist else 'Reading song details…')
+        try:
+            with YoutubeDL(options) as downloader:
+                info = downloader.extract_info(request_url, download=False)
+                if not info:
+                    raise ValueError('No available songs were found in this link.')
+                entries = list(info.get('entries') or []) if playlist else [info]
+        except Exception as exc:
+            raise classify_download_error(exc) from exc
+    usable = [entry for entry in entries if entry and entry.get('availability') not in ('private', 'premium_only', 'subscriber_only')
+              and entry.get('title') not in ('[Private video]', '[Deleted video]')]
+    if len(usable) != len(entries):
+        report('warning', f'{len(entries) - len(usable)} unavailable playlist item(s) were skipped; original track positions are kept.')
+    if not usable:
         raise ValueError('No available songs were found in this link.')
-    if playlist and album_mode:
-        artists = {t.artist for t in tracks}
+    album = info.get('album') or clean_album_name(info.get('title') or '') if treat_as_album else ''
+    tracks = []
+    for index, entry in enumerate(entries, 1):
+        if entry not in usable:
+            continue
+        number = str(entry.get('playlist_index') or index) if treat_as_album else ''
+        tracks.append(track_from_info(entry, album=album, number=number))
+    if treat_as_album:
+        artists = {track.artist for track in tracks}
         albumartist = tracks[0].artist if len(artists) == 1 else 'Various Artists'
         for track in tracks:
-            track.albumartist = albumartist
+            track.albumartist = track.albumartist or albumartist
+            track.album = clean_album_name(track.album, albumartist)
     return tracks
 
 
@@ -164,7 +270,7 @@ def write_tags(path, track):
     warning = ''
     if track.artwork:
         try:
-            request = Request(track.artwork, headers={'User-Agent': 'YTD3/1.0'})
+            request = Request(track.artwork, headers={'User-Agent': 'YTD3/0.3'})
             with urlopen(request, timeout=15) as response:
                 data = response.read(10 * 1024 * 1024 + 1)
             if len(data) > 10 * 1024 * 1024:
@@ -177,45 +283,85 @@ def write_tags(path, track):
                 raise ValueError('Artwork is not a JPEG or PNG image.')
             tags.add(APIC(encoding=3, mime=mime, type=3, desc='Cover', data=data))
         except Exception as exc:
-            warning = f'Artwork skipped: {exc}'
+            warning = f'Artwork skipped: {format_error(exc)}'
     tags.save(path, v2_version=3)
     return warning
 
 
-def download_track(track, folder, progress=lambda percent: None):
+def publish_file(source, folder, stem):
+    # Both operations atomically fail if target exists. No empty reservation
+    # file is left behind if Cancel terminates the worker at this boundary.
+    while True:
+        target = available_path(folder, stem)
+        try:
+            if os.name == 'nt':
+                os.rename(source, target)
+            else:
+                os.link(source, target)
+            return target
+        except FileExistsError:
+            continue
+
+
+def fetch_audio(url, temporary, progress=lambda percent: None, *,
+                cookies_file=None, session_dir=None, report=lambda *_: None):
+    # Keep session copies out of the music folder, which may be shared/synced.
+    context = nullcontext(session_dir) if session_dir else tempfile.TemporaryDirectory(prefix='ytd3-session-')
+    with context as private:
+        return _fetch_audio(url, temporary, progress, cookies_file=cookies_file,
+                            session_dir=private, report=report)
+
+
+def _fetch_audio(url, temporary, progress, *, cookies_file, session_dir, report):
+    from yt_dlp import YoutubeDL
+    temporary = Path(temporary)
+    options = extractor_options(session_dir, cookies_file, report)
+    last_progress = 0
+
+    def callback(data):
+        nonlocal last_progress
+        now = time.monotonic()
+        if data.get('status') == 'downloading' and now - last_progress > 0.2:
+            total = data.get('total_bytes') or data.get('total_bytes_estimate') or 0
+            if total:
+                progress(min(100, data.get('downloaded_bytes', 0) * 100 / total))
+            last_progress = now
+        elif data.get('status') == 'finished':
+            progress(100)
+
+    options.update({'format': 'bestaudio/best', 'noplaylist': True, 'ignoreerrors': False,
+                    'outtmpl': str(temporary / 'source.%(ext)s'), 'overwrites': True,
+                    'progress_hooks': [callback], 'nopart': False})
+    report('status', 'Downloading audio…')
+    try:
+        with YoutubeDL(options) as downloader:
+            info = downloader.extract_info(url, download=True)
+            if not info:
+                raise RuntimeError('The downloader returned no audio information.')
+            downloads = info.get('requested_downloads') or []
+            source = Path(downloads[0]['filepath']) if downloads and downloads[0].get('filepath') else Path(downloader.prepare_filename(info))
+    except Exception as exc:
+        raise classify_download_error(exc) from exc
+    if source.parent.resolve() != temporary.resolve() or not source.is_file():
+        raise RuntimeError('The downloader did not produce an audio file.')
+    return source
+
+
+def download_track(track, folder, progress=lambda percent: None, *, workdir=None,
+                   cookies_file=None, session_dir=None, report=lambda *_: None):
     validate_track(track)
+    validate_url(track.url)
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-
-    def callback(stream, chunk, remaining):
-        total = stream.filesize
-        if total:
-            progress(min(100, (total - remaining) * 100 / total))
-
-    video = youtube_video(track.url, on_progress_callback=callback)
-    streams = list(video.streams.filter(only_audio=True))
-    if not streams:
-        raise RuntimeError('No audio streams are available for this song.')
-    # Compare reported audio bitrate rather than container file size.
-    stream = max(streams, key=lambda s: int(re.sub(r'\D', '', s.abr or '') or 0))
-    stem = safe_filename(f'{track.artist} - {track.title}')
-    with tempfile.TemporaryDirectory(prefix='.ytd3-', dir=folder) as temporary:
-        source = stream.download(output_path=temporary, filename='source.' + stream.subtype)
-        converted = Path(temporary) / 'converted.mp3'
+    context = nullcontext(workdir) if workdir else tempfile.TemporaryDirectory(prefix='.ytd3-', dir=folder)
+    with context as temporary:
+        temporary = Path(temporary)
+        source = fetch_audio(track.url, temporary, progress, cookies_file=cookies_file,
+                             session_dir=session_dir, report=report)
+        converted = temporary / 'converted.mp3'
+        report('status', 'Converting to MP3…')
         convert(source, converted)
+        report('status', 'Writing song details and artwork…')
         warning = write_tags(converted, track)
-        # Reserve the name atomically: never overwrite another file.
-        while True:
-            target = available_path(folder, stem)
-            try:
-                descriptor = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(descriptor)
-                break
-            except FileExistsError:
-                continue
-        try:
-            os.replace(converted, target)
-        except Exception:
-            target.unlink(missing_ok=True)
-            raise
+        target = publish_file(converted, folder, safe_filename(f'{track.artist} - {track.title}'))
     return target, warning

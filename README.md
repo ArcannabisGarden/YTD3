@@ -1,52 +1,61 @@
-# YTD3 desktop 0.2
+# YTD3 desktop 0.3
 
-A small Windows desktop app for saving YouTube audio as tagged MP3 files.
-Requires Windows 10/11 (64-bit) and an internet connection. Download only content you have permission to save.
+A Windows desktop app for saving YouTube audio as tagged MP3 files. Requires Windows 10/11 (64-bit) and an internet connection. Download content you have permission to save.
 
-## Start on your computer
+## Run on Windows
 
-1. Install 64-bit Python 3.11 or newer from https://www.python.org/downloads/windows/ with the Python launcher enabled.
-2. Extract this project into a folder you can write to.
-3. Double-click `start_windows.bat`. First launch installs the dependencies (internet required).
+Download the **YTD3-Windows-0.3** artifact from the latest successful GitHub Actions run. Extract the whole ZIP into a new folder, then run **YTD3.exe**. Keep its supporting files together. The window title shows **0.3**. Python, FFmpeg, and Node do not need to be installed separately.
 
-FFmpeg is included through the `imageio-ffmpeg` dependency; no separate FFmpeg installation is needed. FFmpeg's executable is launched to convert audio to V0 variable-bitrate MP3. This does not increase the quality of the source audio.
+To run from source, install 64-bit Python 3.11 or newer from https://www.python.org/downloads/windows/ with its launcher enabled, extract the source, and double-click `start_windows.bat`. That development launcher opens one setup terminal to install dependencies; the packaged app runs without a console.
 
-## Use
+## Preview and song details
 
-1. Paste a YouTube video or playlist link and click **Preview link**.
-2. For an actual album playlist, enable **Treat playlist as an album** before previewing. Leave it off for mixed playlists. A video URL containing `list=` loads the playlist; remove that parameter to load only the video.
-3. Select each song and edit title, artist, album, album artist, track number, year, genre, and artwork URL. Edits are kept immediately in the current preview. Loading another preview replaces them. Blank optional fields are omitted from tags. Blank artwork URL means no cover.
-4. **Open artwork preview** opens the current image URL in your browser. Use a direct JPEG or PNG URL for replacement art. YouTube thumbnails are suggestions, not verified album covers.
-5. Choose a save folder, then click **Download all songs**. The app stays responsive and logs each result. Downloading is sequential; errors on one song do not stop the others. The folder is remembered for next launch.
+1. Paste a video or playlist link and click **Preview link**.
+2. **Playlist type** defaults to **Auto**. YouTube album playlists (`OLAK…` links, including YouTube Music albums) automatically receive an album name and track numbers in playlist order. Choose **Album** for an ordinary playlist you want treated as an album. Choose **Mixed playlist** to keep songs' supplied metadata without treating the playlist name as an album.
+3. Album and track number are visible in the song table. Select a song to edit title, artist, album, album artist, track number, year, genre, and artwork URL. Structured music metadata takes priority over title guesses. Your edits take priority when writing the final tags.
+4. **Open artwork preview** opens the image URL in your browser. Use a direct JPEG/PNG URL for replacement art; blank means no cover. YouTube thumbnails are suggestions, not verified album covers.
+5. Choose the output folder and click **Download songs**.
 
-The app preserves Live/Remix/featured-artist labels, but artist/title guesses still need human review. It does not query a music catalog for verified album or release information. Track and year fields are validated before downloading. Existing files are kept; duplicate names gain `(2)`, `(3)`, etc. Temporary files are removed on normal completion/failure. An abrupt termination may leave a `.ytd3-` folder, which can be deleted when the app is closed.
+A link containing `list=` loads that playlist. Remove the `list` parameter to preview only the linked video. Edits stay in the current preview; loading a different link replaces it. Only the output folder is remembered across app restarts.
 
-Artwork failure is logged and the tagged song is saved without a cover. Network operations run in the background; closing during an operation offers to wait for it to finish. There is no immediate cancellation or automatic retry. Protected, age-restricted, private, or unavailable videos may fail. This version has no login/cookie support. If YouTube changes, updating `pytubefix` within its supported major version may help.
+## Pause, cancel, and retry
 
-The previous ReplayGain step was removed because it combined filtering with stream copying and suppressed failures. This version does not normalize volume or write ReplayGain tags.
+- **Pause / Resume** suspends the current worker and its helpers during preview, download, artwork retrieval, and conversion. Pause is also respected between songs. A long pause may cause the server connection to expire; use Retry unfinished songs if it cannot resume.
+- **Cancel** stops the current worker/helper processes and removes that task's temporary files. Completed MP3 files are kept. The current incomplete song is discarded.
+- **Retry unfinished songs** retries only songs not yet saved during the current preview. It does not redownload completed songs. This state is kept for the current app session; after restarting or reloading the playlist, existing files are still protected but may receive duplicate names.
+- Closing during work offers to cancel and clean up before exiting.
+- **Save log** exports the original error reason, not just a generic retry count. Signed media URLs are removed from diagnostic messages. Do not include session files when reporting a problem.
 
-## YouTube verification errors
+The app downloads one song at a time with bounded network retries. A shared authentication, stream, or network failure stops the batch immediately; two consecutive other failures also stop it. Remaining songs stay available to retry. An individual unavailable song may be skipped while the next is attempted. Each row shows Ready, Downloading, Saved, Failed, or Cancelled.
 
-Version 0.2 uses pytubefix's WEB client and its automatic proof-of-origin support for single songs, every playlist entry, and downloads. The required Node runtime is included in the Windows build. This follows the downloader's [documented setup](https://pytubefix.readthedocs.io/en/latest/user/po_token.html); no terminal prompt or manual token entry is used.
+Existing files are never overwritten. Duplicate names receive `(2)`, `(3)`, etc. Temporary audio stays in the output folder for atomic publication; session copies and internal task messages are kept separately in OS temporary storage. An abrupt system termination can leave `.ytd3-` folders, which can be deleted after the app is closed.
 
-This improves request compatibility but does not guarantee that YouTube will accept every request. If YouTube still asks for verification, open the link in your browser on your normal connection and check that it plays. Try again later; repeated requests will not resolve a YouTube block. The app stops a download batch at the first explicit bot-detection response and reports how many songs were not attempted. A failed new preview clears the old song list. If the problem persists, a downloader update may be needed.
+## YouTube connection errors
 
-## Share with friends
+Version 0.3 replaces the prior pytubefix/SABR path with yt-dlp. The reported `SABR Maximum reload attempts reached. Stream protection status: PoToken PENDING` error means the earlier engine never obtained a usable playback token; increasing its reload count was not a solution.
 
-On a Windows computer, double-click `build_windows.bat`. It installs the build tools and creates `dist\YTD3\YTD3.exe` plus its supporting files, including FFmpeg. ZIP the **entire `dist\YTD3` folder**, then share the ZIP. Friends extract it and run `YTD3.exe`; they do not need Python. Do not send just the EXE.
+The new engine has bounded retries, retains underlying HTTP/authentication errors, and uses bundled JavaScript support. Its helpers hide their Windows console windows; FFmpeg also runs without a console window.
 
-Build and try the app on Windows before distributing it. Unsigned applications may trigger Windows reputation warnings. Do not disable security tools; code signing is an option for wider distribution. Bundled dependencies have their own licenses; retain the bundled license files when sharing. FFmpeg licensing information: https://www.ffmpeg.org/legal.html and https://github.com/imageio/imageio-ffmpeg.
+YouTube may still require authentication or reject a request. If it explicitly asks you to sign in, **Load cookies.txt** can use a Netscape-format YouTube session file from your own browser. This is optional. Select it locally in the app; do not upload or send the file to anyone. The app uses a private temporary copy, leaves the original unchanged, removes its copy after the operation, and does not remember the selection after you close the app. **Clear** returns to unauthenticated requests. A session file does not guarantee that YouTube will allow a download, and it does not grant access to unavailable content.
+
+For repeated failures, use **Save log** and report the error text. No proxy rotation, repeated unbounded retries, or automatic use of browser accounts is performed.
+
+## Audio and tags
+
+The best available audio stream is converted to V0 variable-bitrate MP3 with libmp3lame. Converting does not improve source quality. Mutagen writes ID3v2.3 tags; blank optional fields are omitted. Artwork failure is logged while the tagged song is retained. This version does not normalize volume or write ReplayGain tags.
+
+## Build and share
+
+On Windows, run `build_windows.bat`. It builds `dist\YTD3\YTD3.exe` and the required supporting files. ZIP and share the **entire `dist\YTD3` folder**, not just the EXE. Preserve bundled dependency license files. The application is unsigned; code signing can be added for wider distribution.
+
+GitHub Actions builds the same folder and publishes **YTD3-Windows-0.3** as an artifact. Artifacts require GitHub sign-in and expire according to repository retention settings. Keep your own copy if needed longer. The workflow checks source tests, real worker pause/resume/cancel, and a packaged worker self-test that retrieves a generated audio tone over local HTTP, executes bundled Node/FFmpeg, and verifies MP3 tags. These checks do not prove YouTube access from a user's connection. Live playback on the reported YouTube Music album could not be verified from the development cloud network because its gateway rejects that destination.
 
 ## Development
 
-- `YTdownloader.py`: Tkinter desktop UI, background workers, progress, settings.
-- `ytd_core.py`: URL validation, metadata suggestions, stream selection, conversion, ID3 tags, safe output.
-- `tests/test_core.py`: metadata, file safety, artwork failure, and a real conversion/tagging round trip using a generated tone (no YouTube download).
+- `YTdownloader.py`: Tkinter UI, playlist mode, operation controls, unfinished-song state, log export.
+- `ytd_core.py`: yt-dlp extraction, structured metadata and guesses, conversion, ID3 tags, safe output.
+- `ytd_jobs.py`: spawned workers, process-tree control, temporary-file cleanup, atomic event messages.
+- `ytd_smoke.py`: local audio fixture and the packaged-app self-test.
+- `tests/`: metadata/defaults, local HTTP audio integration, file protection, real parent/child pause/resume/cancel, and UI workflows.
 
-Run checks with `python -m unittest discover -s tests -v` after installing requirements. Importing the modules does not start a download or prompt for input.
-
-### Build using GitHub instead
-
-This project includes `.github/workflows/windows.yml`. After these files are uploaded to your repository, open **Actions → Build Windows desktop app → Run workflow**. A successful run produces a **YTD3-Windows-0.2** artifact at the bottom of the run page. Download and extract that ZIP, then open `YTD3.exe`. The workflow runs the automated checks on Windows, packages the app, and checks that the executable stays open at startup. A successful build still needs a manual test with a real video before sharing.
-
-The downloadable source project is not a prebuilt Windows executable. Windows packaging and live YouTube behavior have not been verified in the Linux development environment.
+Install `requirements.txt`, then run `python -m unittest discover -s tests -v`. UI tests need a display and run on Windows CI. `YTD3.exe --self-test report.json` runs the offline packaged worker check without opening the GUI. Importing modules does not start a download or prompt for input.
