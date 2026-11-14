@@ -30,6 +30,6 @@ jobs:
           }
       - uses: actions/upload-artifact@v4
         with:
-          name: YTD3-Windows
+          name: YTD3-Windows-0.2
           path: dist/YTD3/
           if-no-files-found: error

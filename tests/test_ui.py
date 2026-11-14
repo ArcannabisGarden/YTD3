@@ -1,5 +1,8 @@
 """UI checks run on Windows CI; skipped when no display is available."""
 import tkinter as tk
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +21,8 @@ class DesktopTests(unittest.TestCase):
 
     def tearDown(self):
         if hasattr(self, 'root'):
+            for callback in self.root.tk.call('after', 'info'):
+                self.root.after_cancel(callback)
             self.root.destroy()
 
     def load_preview(self):
@@ -58,3 +63,32 @@ class DesktopTests(unittest.TestCase):
             self.app.download()
         error.assert_called_once()
         worker.assert_not_called()
+
+    def test_failed_new_preview_clears_previous_songs(self):
+        from pytubefix.exceptions import BotDetection
+        self.load_preview()
+        self.app.url.set('https://youtu.be/new')
+        with patch('YTdownloader.preview', side_effect=BotDetection('new')), \
+             patch('YTdownloader.threading.Thread', side_effect=lambda target, **_: SimpleNamespace(start=target)), \
+             patch('YTdownloader.messagebox.showerror') as error:
+            self.app.load()
+            self.app.poll()
+        self.assertEqual(self.app.tracks, [])
+        self.assertEqual(self.app.values['title'].get(), '')
+        self.assertEqual(str(self.app.download_button['state']), 'disabled')
+        self.assertIn('YouTube is asking for verification', self.app.status.get())
+        error.assert_called_once()
+
+    def test_bot_block_stops_playlist_without_retrying_other_songs(self):
+        from pytubefix.exceptions import BotDetection
+        self.load_preview()
+        with tempfile.TemporaryDirectory() as folder:
+            self.app.folder.set(folder)
+            with patch('YTdownloader.download_track', side_effect=BotDetection('a')) as download, \
+                 patch('YTdownloader.settings_path', return_value=Path(folder) / 'settings.json'), \
+                 patch('YTdownloader.threading.Thread', side_effect=lambda target, **_: SimpleNamespace(start=target)):
+                self.app.download()
+                self.app.poll()
+        download.assert_called_once()
+        self.assertIn('0 saved, 1 failed, 1 not attempted', self.app.status.get())
+        self.assertIn('Stopped after YouTube requested verification', self.app.log.get('1.0', 'end'))

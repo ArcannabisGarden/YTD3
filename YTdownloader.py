@@ -9,7 +9,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import webbrowser
 
-from ytd_core import preview, download_track, validate_track
+from ytd_core import preview, download_track, validate_track, format_error, is_youtube_block
+
+APP_VERSION = '0.2'
 
 FIELDS = [('title', 'Title'), ('artist', 'Artist'), ('album', 'Album'),
           ('albumartist', 'Album artist'), ('track', 'Track number'),
@@ -23,7 +25,7 @@ def settings_path():
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title('YTD3 — Song downloader')
+        self.root.title(f'YTD3 {APP_VERSION} — Song downloader')
         self.root.geometry('1040x750')
         self.root.minsize(850, 650)
         self.events = queue.Queue()
@@ -155,6 +157,14 @@ class App:
             messagebox.showinfo('YouTube link', 'Paste a video or playlist URL first.')
             return
         album_mode = self.album_mode.get()
+        # A failed new preview must not leave an earlier playlist downloadable.
+        self.current = None
+        self.tracks = []
+        self.tree.delete(*self.tree.get_children())
+        self.loading_fields = True
+        for variable in self.values.values():
+            variable.set('')
+        self.loading_fields = False
         self.set_busy(True)
         self.progress.configure(mode='indeterminate')
         self.progress.start()
@@ -164,7 +174,7 @@ class App:
             try:
                 self.events.put(('preview', preview(url, album_mode)))
             except Exception as exc:
-                self.events.put(('error', str(exc)))
+                self.events.put(('error', format_error(exc)))
         threading.Thread(target=worker, daemon=True).start()
 
     def download(self):
@@ -190,6 +200,8 @@ class App:
 
         def worker():
             completed = 0
+            failed = 0
+            unattempted = 0
             for index, track in enumerate(tracks, 1):
                 self.events.put(('status', f'{index}/{len(tracks)}: {track.title} — downloading, then converting and tagging…'))
                 try:
@@ -199,8 +211,13 @@ class App:
                     if warning:
                         self.events.put(('log', warning))
                 except Exception as exc:
-                    self.events.put(('log', f'Failed: {track.title}: {exc}'))
-            self.events.put(('done', f'Finished: {completed} saved, {len(tracks) - completed} failed. See the log for details.'))
+                    failed += 1
+                    self.events.put(('log', f'Failed: {track.title}: {format_error(exc)}'))
+                    if is_youtube_block(exc):
+                        unattempted = len(tracks) - index
+                        self.events.put(('log', 'Stopped after YouTube requested verification. Try again later.'))
+                        break
+            self.events.put(('done', f'Finished: {completed} saved, {failed} failed, {unattempted} not attempted. See the log for details.'))
         threading.Thread(target=worker, daemon=True).start()
 
     def append_log(self, message):
@@ -228,7 +245,7 @@ class App:
                     self.progress.stop()
                     self.progress.configure(mode='determinate', value=0)
                     self.set_busy(False)
-                    self.status.set('Could not load this link. Check the URL and your connection, then retry.')
+                    self.status.set(data)
                     messagebox.showerror('Preview failed', data)
                 elif kind == 'progress':
                     self.progress.configure(value=data)

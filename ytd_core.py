@@ -49,12 +49,38 @@ def validate_url(url):
     return parsed
 
 
+def is_youtube_block(error):
+    from pytubefix.exceptions import BotDetection
+    return isinstance(error, BotDetection)
+
+
+def format_error(error):
+    if is_youtube_block(error):
+        return (
+            'YouTube is asking for verification and blocked this request. '
+            'Open the link in your browser and check that it plays on your normal connection, '
+            'then try again later. If it keeps happening, this app may need a downloader update. '
+            'Repeated retries will not resolve a YouTube block.'
+        )
+    return str(error)
+
+
+def youtube_video(url, **kwargs):
+    from pytubefix import YouTube
+    # WEB activates pytubefix's automatic PO-token support using the bundled
+    # Node runtime. Do not use use_po_token=True: it prompts on stdin, which
+    # a windowed desktop app does not have.
+    return YouTube(url, client='WEB', **kwargs)
+
+
 def preview(url, album_mode=False):
-    from pytubefix import Playlist, YouTube
+    from pytubefix import Playlist
     parsed = validate_url(url)
     is_playlist = bool(parse_qs(parsed.query).get('list'))
     playlist = Playlist(url) if is_playlist else None
-    videos = playlist.videos if playlist else [YouTube(url)]
+    # Playlist.videos silently creates default-client YouTube objects. Build
+    # each video through the same WEB client used by single songs/downloads.
+    videos = (youtube_video(item) for item in playlist.video_urls) if playlist else [youtube_video(url)]
     tracks = []
     for index, video in enumerate(videos, 1):
         title, artist = guess_metadata(video.title, video.author)
@@ -157,7 +183,6 @@ def write_tags(path, track):
 
 
 def download_track(track, folder, progress=lambda percent: None):
-    from pytubefix import YouTube
     validate_track(track)
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -167,7 +192,7 @@ def download_track(track, folder, progress=lambda percent: None):
         if total:
             progress(min(100, (total - remaining) * 100 / total))
 
-    video = YouTube(track.url, on_progress_callback=callback)
+    video = youtube_video(track.url, on_progress_callback=callback)
     streams = list(video.streams.filter(only_audio=True))
     if not streams:
         raise RuntimeError('No audio streams are available for this song.')

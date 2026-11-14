@@ -64,14 +64,33 @@ class CoreTests(unittest.TestCase):
                                   video_id='1', thumbnail_url='https://example.com/1.jpg'),
                   SimpleNamespace(title='B - Two', author='Uploader', watch_url='https://youtu.be/2',
                                   video_id='2', thumbnail_url='https://example.com/2.jpg')]
-        playlist = SimpleNamespace(title='Collection', videos=videos)
-        with patch('pytubefix.Playlist', return_value=playlist):
+        playlist = SimpleNamespace(title='Collection', video_urls=[v.watch_url for v in videos])
+        with patch('pytubefix.Playlist', return_value=playlist), \
+             patch('pytubefix.YouTube', side_effect=videos + videos) as youtube:
             mixed = core.preview('https://youtube.com/playlist?list=arbitrary')
             album = core.preview('https://youtube.com/playlist?list=arbitrary', album_mode=True)
+        self.assertEqual(youtube.call_count, 4)
+        self.assertTrue(all(call.kwargs['client'] == 'WEB' for call in youtube.call_args_list))
         self.assertTrue(all(not t.album and not t.track for t in mixed))
         self.assertEqual(album[1].track, '2')
         self.assertEqual(album[0].albumartist, 'Various Artists')
         self.assertEqual(album[0].album, 'Collection')
+
+    def test_single_song_preview_uses_web_verification(self):
+        video = SimpleNamespace(title='Song', author='Artist', watch_url='https://youtu.be/a',
+                                video_id='a', thumbnail_url='https://example.com/cover.jpg')
+        with patch('pytubefix.YouTube', return_value=video) as youtube:
+            tracks = core.preview(video.watch_url)
+        youtube.assert_called_once_with(video.watch_url, client='WEB')
+        self.assertEqual(tracks[0].title, 'Song')
+
+    def test_bot_block_has_actionable_message(self):
+        from pytubefix.exceptions import BotDetection
+        error = BotDetection('example')
+        self.assertTrue(core.is_youtube_block(error))
+        self.assertIn('YouTube is asking for verification', core.format_error(error))
+        self.assertNotIn('DO NOT OPEN AN ISSUE', core.format_error(error))
+        self.assertEqual(core.format_error(ValueError('Invalid input')), 'Invalid input')
 
     def make_tone(self, path):
         with wave.open(str(path), 'wb') as audio:
@@ -136,8 +155,10 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             existing = Path(folder) / 'Artist - Song (Live).mp3'
             existing.write_bytes(b'original')
-            with patch('pytubefix.YouTube', return_value=video):
+            with patch('pytubefix.YouTube', return_value=video) as youtube:
                 target, warning = core.download_track(self.track(), folder)
+            self.assertEqual(youtube.call_args.kwargs['client'], 'WEB')
+            self.assertTrue(callable(youtube.call_args.kwargs['on_progress_callback']))
             self.assertEqual(existing.read_bytes(), b'original')
             self.assertEqual(target.name, 'Artist - Song (Live) (2).mp3')
             self.assertEqual(str(ID3(target)['TIT2']), 'Song (Live)')

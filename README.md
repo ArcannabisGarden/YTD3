@@ -1,4 +1,4 @@
-# YTD3 desktop
+# YTD3 desktop 0.2
 
 A small Windows desktop app for saving YouTube audio as tagged MP3 files.
 Requires Windows 10/11 (64-bit) and an internet connection. Download only content you have permission to save.
@@ -25,6 +25,12 @@ Artwork failure is logged and the tagged song is saved without a cover. Network 
 
 The previous ReplayGain step was removed because it combined filtering with stream copying and suppressed failures. This version does not normalize volume or write ReplayGain tags.
 
+## YouTube verification errors
+
+Version 0.2 uses pytubefix's WEB client and its automatic proof-of-origin support for single songs, every playlist entry, and downloads. The required Node runtime is included in the Windows build. This follows the downloader's [documented setup](https://pytubefix.readthedocs.io/en/latest/user/po_token.html); no terminal prompt or manual token entry is used.
+
+This improves request compatibility but does not guarantee that YouTube will accept every request. If YouTube still asks for verification, open the link in your browser on your normal connection and check that it plays. Try again later; repeated requests will not resolve a YouTube block. The app stops a download batch at the first explicit bot-detection response and reports how many songs were not attempted. A failed new preview clears the old song list. If the problem persists, a downloader update may be needed.
+
 ## Share with friends
 
 On a Windows computer, double-click `build_windows.bat`. It installs the build tools and creates `dist\YTD3\YTD3.exe` plus its supporting files, including FFmpeg. ZIP the **entire `dist\YTD3` folder**, then share the ZIP. Friends extract it and run `YTD3.exe`; they do not need Python. Do not send just the EXE.
@@ -41,6 +47,6 @@ Run checks with `python -m unittest discover -s tests -v` after installing requi
 
 ### Build using GitHub instead
 
-This project includes `.github/workflows/windows.yml`. After these files are uploaded to your repository, open **Actions → Build Windows desktop app → Run workflow**. A successful run produces a **YTD3-Windows** artifact at the bottom of the run page. Download and extract that ZIP, then open `YTD3.exe`. The workflow runs the automated checks on Windows, packages the app, and checks that the executable stays open at startup. A successful build still needs a manual test with a real video before sharing.
+This project includes `.github/workflows/windows.yml`. After these files are uploaded to your repository, open **Actions → Build Windows desktop app → Run workflow**. A successful run produces a **YTD3-Windows-0.2** artifact at the bottom of the run page. Download and extract that ZIP, then open `YTD3.exe`. The workflow runs the automated checks on Windows, packages the app, and checks that the executable stays open at startup. A successful build still needs a manual test with a real video before sharing.
 
 The downloadable source project is not a prebuilt Windows executable. Windows packaging and live YouTube behavior have not been verified in the Linux development environment.
