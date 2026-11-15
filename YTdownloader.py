@@ -16,7 +16,7 @@ import webbrowser
 from ytd_core import Track, validate_track, validate_url, format_error, relative_output_path
 from ytd_jobs import WorkerJob
 
-APP_VERSION = '0.3.3'
+APP_VERSION = '0.3.4'
 FIELDS = [('title', 'Title'), ('artist', 'Artist'), ('album', 'Album'),
           ('albumartist', 'Album artist'), ('track', 'Track number'),
           ('year', 'Year'), ('genre', 'Genre'), ('artwork', 'Artwork URL')]

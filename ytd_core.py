@@ -97,6 +97,10 @@ class DownloadFailure(RuntimeError):
         self.needs_sign_in = needs_sign_in
 
 
+def is_playlist_authcheck_error(error):
+    return 'playlists that require authentication may not extract correctly without a successful webpage download' in str(error).lower()
+
+
 def format_error(error):
     # Preserve the underlying reason while removing signed media URLs and ANSI.
     text = re.sub(r'\x1b\[[0-9;]*m', '', str(error))
@@ -109,6 +113,13 @@ def format_error(error):
 def classify_download_error(error):
     text = format_error(error)
     lowered = str(error).lower()
+    if is_playlist_authcheck_error(error):
+        return DownloadFailure(
+            'Playlist preview failed because its webpage could not be loaded and its account session could not be checked. '
+            'Check that the playlist opens in your browser. For a private playlist, load fresh cookies from an account '
+            'with access, then retry Preview. Check the log for the earlier webpage request error.',
+            stop_batch=True,
+        )
     # Age verification applies to this video, not the whole playlist.
     if any(word in lowered for word in ('confirm your age', 'age-restricted', 'age restricted', 'age restriction')):
         return DownloadFailure(
@@ -133,8 +144,9 @@ def classify_download_error(error):
 
 
 class QuietLogger:
-    def __init__(self, report):
+    def __init__(self, report, public_album_preview=False):
         self.report = report
+        self.public_album_preview = public_album_preview
 
     def debug(self, message):
         pass
@@ -143,6 +155,9 @@ class QuietLogger:
         pass
 
     def warning(self, message):
+        if self.public_album_preview and is_playlist_authcheck_error(message):
+            self.report('warning', 'The album webpage could not be read; trying the public track list instead.')
+            return
         self.report('warning', format_error(message))
 
     def error(self, message):
@@ -156,15 +171,20 @@ def node_path():
     return str(root / 'node.exe' if os.name == 'nt' else root / 'bin' / 'node')
 
 
-def extractor_options(workdir, cookies_file=None, report=lambda *_: None):
+def extractor_options(workdir, cookies_file=None, report=lambda *_: None, *, public_album_preview=False):
     options = {
         'quiet': True, 'no_warnings': False, 'no_color': True,
-        'logger': QuietLogger(report), 'socket_timeout': 15,
+        'logger': QuietLogger(report, public_album_preview), 'socket_timeout': 15,
         'retries': 2, 'fragment_retries': 2, 'extractor_retries': 1,
         'file_access_retries': 1, 'concurrent_fragment_downloads': 1,
         'cachedir': False, 'js_runtimes': {'node': {'path': node_path()}},
         'ffmpeg_location': ffmpeg_path(),
     }
+    if public_album_preview:
+        # Documented yt-dlp fallback for public albums when the HTML page
+        # cannot be read. This is only set for OLAK album metadata previews;
+        # private playlists and individual video downloads keep their checks.
+        options['extractor_args'] = {'youtubetab': {'skip': ['authcheck']}}
     if cookies_file:
         # Work on a private temporary copy; yt-dlp can update its cookie jar.
         source = Path(cookies_file).resolve()
@@ -244,7 +264,8 @@ def preview(url, album_mode='Album', *, cookies_file=None, workdir=None, report=
     treat_as_album = playlist and (album_mode == 'Album' or (album_mode == 'Auto' and is_album_playlist(url)))
     context = nullcontext(workdir) if workdir else tempfile.TemporaryDirectory(prefix='ytd3-preview-')
     with context as temporary:
-        options = extractor_options(temporary, cookies_file, report)
+        options = extractor_options(temporary, cookies_file, report,
+                                    public_album_preview=playlist_id.startswith('OLAK5uy_'))
         options.update({'extract_flat': 'in_playlist' if playlist else False, 'skip_download': True,
                         'noplaylist': not playlist, 'ignoreerrors': False})
         # A Music watch URL with list= explicitly means the entire playlist.

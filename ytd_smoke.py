@@ -24,12 +24,52 @@ class SilentHandler(SimpleHTTPRequestHandler):
         pass
 
 
+def verify_public_album_fallback(folder):
+    """Exercise yt-dlp's real auth guard with only the network calls faked."""
+    from yt_dlp import YoutubeDL
+    from yt_dlp.extractor.youtube import YoutubeTabIE
+    from yt_dlp.utils import ExtractorError
+    from ytd_core import extractor_options, is_playlist_authcheck_error
+
+    class MissingWebpageTab(YoutubeTabIE):
+        api_calls = 0
+
+        @property
+        def is_authenticated(self):
+            return True
+
+        def _extract_webpage(self, *args, **kwargs):
+            return None, None
+
+        def extract_ytcfg(self, *args, **kwargs):
+            return {}
+
+        def _extract_tab_endpoint(self, *args, **kwargs):
+            self.api_calls += 1
+            return {'contents': {'public_album_fixture': True}}
+
+    for public_album in (False, True):
+        options = extractor_options(folder, public_album_preview=public_album)
+        with YoutubeDL(options) as downloader:
+            extractor = MissingWebpageTab(downloader)
+            try:
+                data, _ = extractor._extract_data('https://www.youtube.com/playlist?list=OLAK5uy_example', 'example')
+            except ExtractorError as exc:
+                if public_album or not is_playlist_authcheck_error(exc) or extractor.api_calls:
+                    raise RuntimeError('Unexpected playlist auth-check behavior.') from exc
+            else:
+                if not public_album or data != {'contents': {'public_album_fixture': True}} or extractor.api_calls != 1:
+                    raise RuntimeError('Public album API fallback did not behave as expected.')
+    return True
+
+
 def worker_diagnostic(folder):
     from mutagen.mp3 import MP3
     from PIL import Image
     from yt_dlp.utils import Popen
     from ytd_core import node_path, fetch_audio, convert, write_tags, Track, track_from_info, download_track, read_saved_tags
     folder = Path(folder)
+    verify_public_album_fallback(folder)
     for name in ('lib.min.js', 'core.min.js'):
         if not files('yt_dlp_ejs.yt.solver').joinpath(name).is_file():
             raise RuntimeError(f'Missing bundled JavaScript component: {name}')
@@ -75,7 +115,7 @@ def worker_diagnostic(folder):
         raise RuntimeError('WebP artwork was not embedded as a JPEG cover.')
     return {'worker': True, 'node': output.strip(), 'javascript_components': True,
             'local_http_download': True, 'conversion': True, 'metadata': True, 'webp_cover_as_jpeg': True,
-            'output_path': converted.relative_to(folder).as_posix(), 'existing_audio_preserved': True}
+            'output_path': converted.relative_to(folder).as_posix(), 'existing_audio_preserved': True, 'public_album_preview_fallback': True}
 
 
 def run_self_test(report_path):
