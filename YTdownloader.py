@@ -1,382 +1,493 @@
-import sys
-import requests
-import urllib.parse as urlparse
+"""Windows desktop entry point and process-isolated operation controls."""
+import multiprocessing
+
+# Must run before GUI imports when the frozen EXE starts a background worker.
+if __name__ == '__main__':
+    multiprocessing.freeze_support()
+
+from dataclasses import asdict
+from pathlib import Path
+import json
 import os
-import re
-import subprocess
-from pytubefix import YouTube, Playlist
-from tqdm import tqdm
-from colorama import Fore, Style, init
-from pydub import AudioSegment
-from mutagen.easyid3 import EasyID3
-from mutagen.id3 import ID3, APIC, TPE2, TSSE, TENC
-
-init(autoreset=True)
-Download_DIR = r'C:\Users\vague\OneDrive\Escritorio\YTD'
-link = input("Enter YouTube URL: ")
-mp3_path = "song.mp3"
-
-progress_bar = None
-
-class Log:
-    @staticmethod
-    def info(msg):
-        print(Fore.CYAN + msg + Style.RESET_ALL)
-
-    @staticmethod
-    def success(msg):
-        print(Fore.GREEN + msg + Style.RESET_ALL)
-
-    @staticmethod
-    def warn(msg):
-        print(Fore.YELLOW + "WARN: " + Style.RESET_ALL + msg)
-
-    @staticmethod
-    def error(msg):
-        print(Fore.RED + "ERROR: " + Style.RESET_ALL + msg)
-
-    @staticmethod
-    def action(msg):
-        print(Fore.LIGHTWHITE_EX + ">> " + Style.RESET_ALL + msg)
-
-
-def convert_to_mp3(file_path):
-    mp3_path = os.path.splitext(file_path)[0] + ".mp3"
-    audio = AudioSegment.from_file(file_path)
-    audio.export(mp3_path, format="mp3", parameters=["-codec:a","libmp3lame","-q:a","0"])
-    os.remove(file_path)
-    return mp3_path
-
-
-def progress_function(stream, chunk, bytes_remaining):
-    global progress_bar
-    if progress_bar:
-        progress_bar.update(len(chunk))
-
-
-def complete_function(stream, file_path):
-    global progress_bar
-    if progress_bar:
-        progress_bar.close()
-        progress_bar = None
-
-
-def is_video_url(url):
-    return "watch?v=" in url or "youtu.be/" in url
-
-
-def get_list_id(url):
-    query = urlparse.urlparse(url).query
-    params = urlparse.parse_qs(query)
-    return params.get("list", [None])[0]
-
-
-def apply_track_replaygain(mp3_path):
-    cmd = ["ffmpeg", "-y", "-i", mp3_path, "-af",
-           "replaygain", "-vn", "-acodec", "copy",
-           mp3_path + ".rg.mp3"
-           ]
-    subprocess.run(cmd,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                   )
-
-
-def split_artist_from_title(title):
-    separators = [" - ", " – ", " — ", " : ", "|"]
-    for sep in separators:
-        if sep not in title:
-            continue
-        left, right = title.split(sep, 1)
-        artist = left.strip()
-        track = right.strip()
-
-        track = re.sub(r'\(.*?\)', '', track)
-        track = re.sub(r'\[.*?\]', '', track)
-        track = track.strip()
-
-        if len(artist) < 2 or len(track) < 2:
-            continue
-        return artist, track
-    return None, None
-
-
-def clean_artist_name(name):
-    if not name:
-        return None
-    name = name.strip()
-    if name.lower().endswith(" - topic"):
-        name = name[:-8].strip()
-    return name
-
-
-def clean_album_name(name, artist):
-    if not name:
-        return None
-
-    if artist:
-        artist_re = re.escape(artist)
-        name = re.sub(
-            rf'^{artist_re}\s*[-–—:|.]\s*',
-            '',
-            name,
-            flags=re.I
-        )
-
-    name = re.sub(r'^-\s+', '', name)
-    return name.strip()
-
-
-def normalize_album_name(name):
-    if not name:
-        return None
-
-    name = re.sub(r'\(.*?\)|\[.*?\]', '', name)
-    name = re.sub(
-        r'\b(full\s*)?(album|ep|lp|official|playlist)\b',
-        '',
-        name,
-        flags=re.I
-    )
-    name = re.sub(r'\s+', ' ', name).strip()
-    name = re.sub(r'^-\s+', '', name)
-
-    return name or None
-
-
-def derive_playlist_album(pl):
-
-    playlist_artist = clean_artist_name(pl.videos[0].author) if pl.videos else None
-    album = clean_album_name(pl.title, playlist_artist)
-    album = normalize_album_name(album)
-
-    if not album:
-        return "Unknown Album"
-
-    return album
-
-
-def safe_filename(name):
-
-    if not name:
-        return ""
-
-    return "".join(
-        "꞉" if c == ":" else "_" if c in r'<>"/\|?*' else c
-        for c in name
-    ).strip()
-
-
-def normalize_title(title):
-    if not title:
-        return title
-    return re.sub(
-        r'\s*(official|lyrics?|video|audio|mv)\s*',
-        '',
-        title,
-        flags=re.I
-    ).strip()
-
-
-def force_strip_artist_prefix(title, artist):
-    if not title or not artist:
-        return title
-
-    artist_re = re.escape(artist)
-    pattern = rf'^{artist_re}\s*[-–—:|]\s*'
-    return re.sub(pattern, '', title, flags=re.I).strip()
-
-
-def clean_track_title(title):
-    if not title:
-        return title
-
-    title = re.sub(r'\(.*?\)|\[.*?\]', '', title)
-    title = re.sub(r'\.{2,}', '.', title)
-    title = re.sub(r'\s+', ' ', title)
-    return title.strip(" .-_–—:")
-
-
-def resolve_metadata(yt, *, album, track, artist_hint=None):
-    raw_artist = clean_artist_name(artist_hint or yt.author)
-
-    title = normalize_title(yt.title)
-    split_artist, split_title = split_artist_from_title(title)
-
-    if split_artist and split_title:
-        final_artist = clean_artist_name(split_artist)
-        final_title = split_title
-    else:
-        final_artist = raw_artist
-        final_title = force_strip_artist_prefix(title, final_artist)
-
-    final_title = clean_track_title(final_title)
-
-    return {
-        "artist": final_artist,
-        "title": final_title,
-        "album": album,
-        "track": track,
-    }
-
-
-def add_id3_tags(mp3_path, metadata, yt):
-    try:
-        tags = EasyID3(mp3_path)
-    except Exception:
-        tags = EasyID3()
-        tags.save(mp3_path)
-        tags = EasyID3(mp3_path)
-    tags["title"] = metadata["title"]
-    tags["artist"] = metadata["artist"]
-    tags["albumartist"] = metadata["artist"]
-
-    if metadata.get("album"):
-        tags["album"] = metadata["album"]
-    if metadata.get("track"):
-        tags["tracknumber"] = str(metadata["track"])
-    tags.save()
-    audio = ID3(mp3_path)
-
-    if "TPE2" in audio:
-        del audio["TPE2"]
-    audio["TPE2"] = TPE2(encoding=3,text=[metadata["artist"]])
-    audio["TENC"] = TENC(encoding=3, text=["libmp3lame"])
-    audio["TSSE"] = TSSE(encoding=3, text=["V0 (VBR)"])
-
-    thumb_url = f"https://img.youtube.com/vi/{yt.video_id}/maxresdefault.jpg"
-    response = requests.get(thumb_url)
-
-    if response.status_code != 200 or "image" not in response.headers.get("content-type", ""):
-        thumb_url = f"https://img.youtube.com/vi/{yt.video_id}/hqdefault.jpg"
-        response = requests.get(thumb_url)
-
-    if response.status_code != 200 or "image" not in response.headers.get("content-type", ""):
-        thumb_url = f"https://img.youtube.com/vi/{yt.video_id}/sddefault.jpg"
-        response = requests.get(thumb_url)
-
-    img = response.content
-    mime = response.headers.get("content-type", "image/jpeg")
-
-    for key in list(audio.keys()):
-        if key.startswith("APIC"):
-            del audio[key]
-
-    audio.add(APIC(
-        encoding=3,mime=mime,type=3,desc="Cover",data=img
-    ))
-    audio.save(v2_version=3)
-
-
-playlist_prefixes = ("PL", "UU", "OL")
-list_id = get_list_id(link)
-is_playlist = (
-    list_id is not None
-    and any(list_id.startswith(prefix) for prefix in playlist_prefixes)
-)
-
-
-# ==============================================================
-# PLAYLIST MODE
-# ==============================================================
-if is_playlist:
-    Log.success("\nDetected: PLAYLIST\n")
-    pl = Playlist(link)
-    Log.info(f"Playlist Title: {pl.title}")
-
-    playlist_artist = clean_artist_name(pl.videos[0].author) if pl.videos else None
-
-    raw_album = clean_album_name(pl.title, playlist_artist)
-    album_name = derive_playlist_album(pl)
-
-
-    playlist_folder = os.path.join(
-        Download_DIR,
-        safe_filename(album_name)
-    )
-    os.makedirs(playlist_folder, exist_ok=True)
-
-    playlist_folder = os.path.join(Download_DIR, safe_filename(album_name))
-    os.makedirs(playlist_folder, exist_ok=True)
-
-    Log.info(f"Songs in playlist: {len(pl.videos)}\n")
-
-    for track_number, yt in enumerate(pl.videos, start=1):
-        tqdm.write(Fore.LIGHTWHITE_EX + f"\n>> Downloading {track_number}: {yt.title}" + Style.RESET_ALL)
-
-        progress_bar = None
-        audio_streams = yt.streams.filter(only_audio=True)
-        opus_streams = [s for s in audio_streams if "webm" in s.mime_type]
-        if opus_streams:
-            best_stream = max(opus_streams, key=lambda s: s.filesize or 0)
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import webbrowser
+
+from ytd_core import Track, validate_track, validate_url, format_error, relative_output_path
+from ytd_jobs import WorkerJob
+
+APP_VERSION = '0.3.5'
+VISIBLE_SONG_ROWS = 15
+FIELDS = [('title', 'Title'), ('artist', 'Artist'), ('album', 'Album'),
+          ('albumartist', 'Album artist'), ('track', 'Track number'),
+          ('year', 'Year'), ('genre', 'Genre'), ('artwork', 'Artwork URL')]
+
+
+def settings_path():
+    return Path(os.environ.get('APPDATA', str(Path.home()))) / 'YTD3' / 'settings.json'
+
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        root.title(f'YTD3 {APP_VERSION} — Song downloader')
+        root.geometry('1120x760')
+        root.minsize(980, 700)
+        self.tracks = []
+        self.current = None
+        self.loading_fields = False
+        self.busy = False
+        self.job = None
+        self.kind = None
+        self.close_after = False
+        self.cancel_requested = False
+        self.paused = False
+        self.completed = set()
+        self.batch = []
+        self.batch_position = 0
+        self.consecutive_failures = 0
+        self.last_detail = ''
+        self.url = tk.StringVar()
+        self.folder = tk.StringVar(value=str(Path.home() / 'Music' / 'YTD3'))
+        self.album_mode = tk.StringVar(value='Album')
+        self.cookies_file = ''  # Session files are never remembered in settings.
+        self.session_label = tk.StringVar(value='No session file selected')
+        self.output_preview = tk.StringVar(value='Select a song to see its output name.')
+        self.status = tk.StringVar(value='Paste a link to preview songs. Playlists use album folders and track order by default.')
+        self.values = {key: tk.StringVar() for key, _ in FIELDS}
+        try:
+            saved = json.loads(settings_path().read_text(encoding='utf-8'))
+            if isinstance(saved.get('folder'), str):
+                self.folder.set(saved['folder'])
+        except (OSError, ValueError, AttributeError):
+            pass
+        self.build()
+        for variable in self.values.values():
+            variable.trace_add('write', self.edit)
+        root.protocol('WM_DELETE_WINDOW', self.close)
+        self.timer = root.after(100, self.poll)
+
+    def build(self):
+        style = ttk.Style()
+        if 'vista' in style.theme_names():
+            style.theme_use('vista')
+        panel = ttk.Frame(self.root, padding=16)
+        panel.pack(fill='both', expand=True)
+        ttk.Label(panel, text='YTD3', font=('Segoe UI', 24, 'bold')).pack(anchor='w')
+        ttk.Label(panel, text='Preview songs, edit their details, and save as MP3.').pack(anchor='w', pady=(0, 12))
+        link_row = ttk.Frame(panel)
+        link_row.pack(fill='x')
+        self.url_entry = ttk.Entry(link_row, textvariable=self.url)
+        self.url_entry.pack(side='left', fill='x', expand=True)
+        self.preview_button = ttk.Button(link_row, text='Preview link', command=self.load)
+        self.preview_button.pack(side='left', padx=(8, 0))
+        mode_row = ttk.Frame(panel)
+        mode_row.pack(fill='x', pady=8)
+        ttk.Label(mode_row, text='Playlist type:').pack(side='left', padx=(0, 8))
+        self.mode_picker = ttk.Combobox(mode_row, state='readonly', width=17,
+            textvariable=self.album_mode, values=['Auto', 'Album', 'Mixed playlist'])
+        self.mode_picker.pack(side='left')
+        ttk.Label(mode_row, text='Album uses the playlist name and track order. Choose Mixed playlist for collections.').pack(side='left', padx=10)
+        session = ttk.Frame(panel)
+        session.pack(fill='x', pady=(0, 10))
+        ttk.Label(session, text='YouTube session (optional):').pack(side='left')
+        self.session_button = ttk.Button(session, text='Load cookies.txt…', command=self.browse_session)
+        self.session_button.pack(side='left', padx=8)
+        self.clear_session_button = ttk.Button(session, text='Clear', command=self.clear_session)
+        self.clear_session_button.pack(side='left')
+        ttk.Label(session, textvariable=self.session_label).pack(side='left', padx=10)
+        middle = ttk.Frame(panel)
+        middle.pack(fill='x', expand=False)
+        left = ttk.Frame(middle)
+        left.pack(side='left', fill='x', expand=True, anchor='n', padx=(0, 16))
+        self.tree = ttk.Treeview(left, columns=('artist', 'album', 'track', 'state'), selectmode='browse', height=VISIBLE_SONG_ROWS)
+        for key, label, width in [('#0', 'Song', 190), ('artist', 'Artist', 120),
+                                   ('album', 'Album', 120), ('track', '#', 38), ('state', 'Status', 95)]:
+            self.tree.heading(key, text=label)
+            self.tree.column(key, width=width, minwidth=30, stretch=key not in ('track', 'state'))
+        scrollbar = ttk.Scrollbar(left, orient='vertical', command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side='right', fill='y')
+        self.tree.pack(fill='both', expand=True)
+        self.tree.bind('<<TreeviewSelect>>', self.select)
+        right = ttk.Frame(middle)
+        right.pack(side='left', fill='both')
+        self.entries = []
+        for row, (key, label) in enumerate(FIELDS):
+            ttk.Label(right, text=label).grid(row=row, column=0, sticky='w', padx=(0, 8), pady=3)
+            entry = ttk.Entry(right, textvariable=self.values[key], width=27, state='disabled')
+            entry.grid(row=row, column=1, sticky='ew', pady=3)
+            self.entries.append(entry)
+        self.art_button = ttk.Button(right, text='Open artwork preview', command=self.show_artwork, state='disabled')
+        self.art_button.grid(row=len(FIELDS), column=0, columnspan=2, sticky='w', pady=6)
+        ttk.Label(panel, text='Songs with an album are saved in an album subfolder. Existing app downloads can have their tags and artwork updated.').pack(anchor='w', pady=(10, 6))
+        output = ttk.Frame(panel)
+        output.pack(fill='x')
+        ttk.Label(output, text='Save to:').pack(side='left', padx=(0, 8))
+        self.folder_entry = ttk.Entry(output, textvariable=self.folder)
+        self.folder_entry.pack(side='left', fill='x', expand=True)
+        self.browse_button = ttk.Button(output, text='Browse…', command=self.browse)
+        self.browse_button.pack(side='left', padx=8)
+        self.download_button = ttk.Button(output, text='Download / update songs', command=self.download, state='disabled')
+        self.download_button.pack(side='left')
+        controls = ttk.Frame(panel)
+        controls.pack(fill='x', pady=(10, 4))
+        self.pause_button = ttk.Button(controls, text='Pause', command=self.toggle_pause, state='disabled')
+        self.pause_button.pack(side='left')
+        self.cancel_button = ttk.Button(controls, text='Cancel', command=self.cancel, state='disabled')
+        self.cancel_button.pack(side='left', padx=8)
+        ttk.Label(controls, textvariable=self.output_preview, wraplength=570).pack(side='left', padx=10)
+        ttk.Button(controls, text='Save log…', command=self.save_log).pack(side='right')
+        self.progress = ttk.Progressbar(panel, maximum=100)
+        self.progress.pack(fill='x', pady=(6, 6))
+        ttk.Label(panel, textvariable=self.status, wraplength=1040).pack(anchor='w')
+        self.log = tk.Text(panel, height=8, wrap='word', state='disabled', font=('Segoe UI', 9))
+        self.log.pack(fill='both', expand=True, pady=(6, 0))
+
+    def update_row(self, index, state=None):
+        track = self.tracks[index]
+        old = self.tree.item(str(index), 'values')
+        state = state if state is not None else (old[3] if old else 'Ready')
+        self.tree.item(str(index), text=track.title, values=(track.artist, track.album, track.track, state))
+
+    def edit(self, *_):
+        if self.loading_fields or self.current is None or self.busy:
+            return
+        track = self.tracks[self.current]
+        for key, _ in FIELDS:
+            value = self.values[key].get().strip()
+            if value != getattr(track, key) and key not in track.edited_fields:
+                track.edited_fields.append(key)
+            setattr(track, key, value)
+        self.update_row(self.current)
+        self.update_output_preview()
+
+    def update_output_preview(self):
+        if self.current is None:
+            self.output_preview.set('Select a song to see its output name.')
         else:
-            best_stream = max(audio_streams, key=lambda s: s.filesize or 0)
+            self.output_preview.set('Output: ' + relative_output_path(self.tracks[self.current]).as_posix())
 
-        progress_bar = tqdm(
-            total=best_stream.filesize,
-            unit="B",
-            unit_scale=True,
-            desc=yt.title[:40],
-            leave=True,
-        )
+    def select(self, _=None):
+        selected = self.tree.selection()
+        if not selected or int(selected[0]) >= len(self.tracks):
+            return
+        self.current = int(selected[0])
+        self.loading_fields = True
+        for key, _ in FIELDS:
+            self.values[key].set(getattr(self.tracks[self.current], key))
+        self.loading_fields = False
+        self.update_output_preview()
+        for entry in self.entries:
+            entry.configure(state='disabled' if self.busy else 'normal')
+        self.art_button.configure(state='disabled' if self.busy else 'normal')
 
-        yt.register_on_progress_callback(progress_function)
-        yt.register_on_complete_callback(complete_function)
+    def show_artwork(self):
+        from urllib.parse import urlparse
+        url = self.values['artwork'].get().strip()
+        if urlparse(url).scheme in ('https', 'http'):
+            webbrowser.open(url)
+        else:
+            messagebox.showinfo('Artwork', 'Enter an HTTP(S) artwork image URL first.')
 
-        file_path = best_stream.download(playlist_folder)
+    def browse(self):
+        folder = filedialog.askdirectory(title='Choose where to save MP3 files')
+        if folder:
+            self.folder.set(folder)
 
-        safe_title = safe_filename(yt.title)
-        new_path = os.path.join(playlist_folder, safe_title + ".webm")
-        os.rename(file_path, new_path)
-        file_path = new_path
+    def browse_session(self):
+        path = filedialog.askopenfilename(title='Select a local YouTube cookies.txt file',
+                                         filetypes=[('Cookies files', '*.txt'), ('All files', '*.*')])
+        if path:
+            self.cookies_file = path
+            self.session_label.set(Path(path).name + ' (this session only)')
 
-        mp3_path = convert_to_mp3(file_path)
-        apply_track_replaygain(mp3_path)
-        metadata = resolve_metadata(
-            yt, album=album_name, track=track_number, artist_hint=None
-        )
-        print(metadata)
-        add_id3_tags(mp3_path,metadata, yt)
+    def clear_session(self):
+        self.cookies_file = ''
+        self.session_label.set('No session file selected')
 
-    Log.success("\nPlaylist downloaded and converted to MP3 with track info\n")
+    def save_log(self):
+        path = filedialog.asksaveasfilename(title='Save download log', defaultextension='.txt',
+                                          initialfile='YTD3-log.txt', filetypes=[('Text file', '*.txt')])
+        if path:
+            try:
+                names = [{'video_id': track.video_id, 'title': track.title, 'artist': track.artist,
+                          'album': track.album, 'output': relative_output_path(track).as_posix()}
+                         for track in self.tracks]
+                Path(path).write_text(f'YTD3 {APP_VERSION}\n' + self.log.get('1.0', 'end')
+                    + '\nSong names and output files:\n' + json.dumps(names, indent=2, ensure_ascii=False), encoding='utf-8')
+            except OSError as exc:
+                messagebox.showerror('Could not save log', str(exc))
 
-# ==============================================================
-# SINGLE VIDEO MODE
-# ==============================================================
-elif is_video_url(link):
-    Log.success("\nDetected: single video\n")
-    yt = YouTube(link)
-    Log.info(f"Title: {yt.title}")
+    def set_busy(self, value):
+        self.busy = value
+        self.paused = False
+        for widget in (self.preview_button, self.url_entry, self.folder_entry, self.browse_button,
+                       self.session_button, self.clear_session_button):
+            widget.configure(state='disabled' if value else 'normal')
+        self.mode_picker.configure(state='disabled' if value else 'readonly')
+        pending = len(self.completed) < len(self.tracks)
+        self.download_button.configure(state='normal' if self.tracks and pending and not value else 'disabled',
+            text='Retry unfinished songs' if self.completed or any(self.tree.set(str(i), 'state') in ('Failed', 'Needs sign-in') for i in range(len(self.tracks))) else 'Download / update songs')
+        for entry in self.entries:
+            entry.configure(state='normal' if self.current is not None and not value else 'disabled')
+        self.art_button.configure(state='normal' if self.current is not None and not value else 'disabled')
+        self.pause_button.configure(text='Pause', state='normal' if value else 'disabled')
+        self.cancel_button.configure(state='normal' if value else 'disabled')
 
-    audio_streams = yt.streams.filter(only_audio=True)
-    opus_streams = [s for s in audio_streams if "webm" in s.mime_type]
-    if opus_streams:
-        best_stream = max(opus_streams, key=lambda s: s.filesize or 0)
-    else:
-        best_stream = max(audio_streams, key=lambda s: s.filesize or 0)
+    def load(self):
+        url = self.url.get().strip()
+        try:
+            validate_url(url)
+        except ValueError as exc:
+            messagebox.showinfo('YouTube link', str(exc))
+            return
+        self.current = None
+        self.update_output_preview()
+        self.tracks = []
+        self.completed.clear()
+        self.tree.delete(*self.tree.get_children())
+        self.loading_fields = True
+        for variable in self.values.values():
+            variable.set('')
+        self.loading_fields = False
+        self.cancel_requested = False
+        self.kind = 'preview'
+        self.set_busy(True)
+        self.progress.configure(mode='indeterminate')
+        self.progress.start()
+        self.last_detail = 'Loading song details…'
+        self.status.set(self.last_detail)
+        self.append_log(f'Preview: {url} — playlist type: {self.album_mode.get()}')
+        try:
+            self.job = WorkerJob('preview', {'url': url, 'album_mode': self.album_mode.get(),
+                                           'cookies_file': self.cookies_file})
+        except Exception as exc:
+            self.finish_preview(error=format_error(exc))
 
-    progress_bar = tqdm(
-        total=best_stream.filesize,
-        unit="B",
-        unit_scale=True,
-        desc=yt.title[:40],
-        leave=True
-    )
+    def download(self):
+        self.batch = [index for index in range(len(self.tracks)) if index not in self.completed]
+        if not self.batch:
+            return
+        try:
+            for index in self.batch:
+                validate_track(self.tracks[index])
+            if not self.folder.get().strip():
+                raise ValueError('Choose a destination folder.')
+            Path(self.folder.get().strip()).mkdir(parents=True, exist_ok=True)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror('Check song details', str(exc))
+            return
+        self.kind = 'download'
+        self.cancel_requested = False
+        self.batch_position = 0
+        self.consecutive_failures = 0
+        self.set_busy(True)
+        self.progress.configure(mode='determinate', value=0)
+        self.append_log(f'Starting {len(self.batch)} unfinished song(s). Already saved: {len(self.completed)}.')
+        try:
+            path = settings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({'folder': self.folder.get().strip()}), encoding='utf-8')
+        except OSError:
+            self.append_log('Could not remember the output folder for next time.')
+        self.start_next()
 
-    yt.register_on_progress_callback(progress_function)
-    yt.register_on_complete_callback(complete_function)
+    def start_next(self):
+        if self.cancel_requested:
+            self.finish_download('Cancelled')
+            return
+        if self.batch_position >= len(self.batch):
+            self.finish_download('Finished')
+            return
+        if self.paused:
+            self.status.set('Paused between songs. Resume to continue, or Cancel to stop.')
+            return
+        index = self.batch[self.batch_position]
+        self.update_row(index, 'Downloading')
+        self.tree.see(str(index))
+        self.progress.configure(value=0)
+        self.last_detail = f'{self.batch_position + 1}/{len(self.batch)}: {self.tracks[index].title} — starting…'
+        self.status.set(self.last_detail)
+        try:
+            self.job = WorkerJob('download', {'track': asdict(self.tracks[index]),
+                'output': self.folder.get().strip(), 'cookies_file': self.cookies_file})
+        except Exception as exc:
+            self.update_row(index, 'Failed')
+            self.append_log(format_error(exc))
+            self.finish_download('Stopped — could not start download')
 
-    file_path = best_stream.download(Download_DIR)
-    mp3_path = convert_to_mp3(file_path)
-    apply_track_replaygain(mp3_path)
+    def toggle_pause(self):
+        if not self.busy or self.cancel_requested:
+            return
+        try:
+            if self.paused:
+                if self.job:
+                    self.job.resume()
+                self.paused = False
+                self.pause_button.configure(text='Pause')
+                self.status.set(self.last_detail)
+                if not self.job and self.kind == 'download':
+                    self.start_next()
+            else:
+                if self.job:
+                    self.job.pause()
+                self.paused = self.job.paused if self.job else True
+                if self.paused:
+                    self.pause_button.configure(text='Resume')
+                    self.status.set('Paused. Resume to continue, or Cancel to stop and keep completed songs.')
+        except Exception as exc:
+            self.append_log(f'Could not change pause state: {format_error(exc)}')
+            messagebox.showerror('Pause / Resume', format_error(exc))
 
-    metadata = resolve_metadata(
-        yt, album=None, track=None, artist_hint=yt.author
-    )
-    add_id3_tags(mp3_path, metadata, yt)
+    def cancel(self):
+        self.cancel_requested = True
+        self.status.set('Cancelling and cleaning temporary files… Completed songs will be kept.')
+        self.pause_button.configure(state='disabled')
+        self.cancel_button.configure(state='disabled')
+        if self.job:
+            try:
+                self.job.cancel()
+            except Exception as exc:
+                self.append_log(f'Could not stop worker: {format_error(exc)}')
+                self.cancel_button.configure(state='normal')
+        elif self.kind == 'preview':
+            self.finish_preview(cancelled=True)
+        else:
+            self.finish_download('Cancelled')
 
-    Log.success("Converted to MP3 with track info\n")
-    Log.success("Download complete!")
+    def close_job(self):
+        job, self.job = self.job, None
+        if job:
+            warning = job.close()
+            if warning:
+                self.append_log(warning)
 
-else:
-    Log.error("Invalid link")
-    sys.exit(1)
+    def finish_preview(self, tracks=None, error=None, cancelled=False):
+        self.close_job()
+        self.progress.stop()
+        self.progress.configure(mode='determinate', value=0)
+        if tracks and not cancelled:
+            self.tracks = [Track(**track) for track in tracks]
+            for index, track in enumerate(self.tracks):
+                self.tree.insert('', 'end', iid=str(index), text=track.title,
+                                 values=(track.artist, track.album, track.track, 'Ready'))
+            self.tree.selection_set('0')
+            self.select()
+            self.last_detail = f'{len(tracks)} song(s) loaded. Review the album and track columns, then download.'
+        elif error:
+            self.last_detail = 'Preview failed. See the log for the full reason.'
+            self.append_log(error)
+            if not self.close_after:
+                messagebox.showerror('Could not load songs', error)
+        else:
+            self.last_detail = 'Preview cancelled.'
+        self.set_busy(False)
+        self.status.set(self.last_detail)
+
+    def finish_download(self, reason):
+        self.close_job()
+        self.set_busy(False)
+        remaining = len(self.tracks) - len(self.completed)
+        self.status.set(f'{reason}. {len(self.completed)} song(s) saved; {remaining} unfinished. See the log for details.')
+        self.append_log(self.status.get())
+        self.progress.configure(value=100 if remaining == 0 else 0)
+
+    def append_log(self, message):
+        self.log.configure(state='normal')
+        self.log.insert('end', message + '\n')
+        self.log.see('end')
+        self.log.configure(state='disabled')
+
+    def handle_result(self, value):
+        if self.kind == 'preview':
+            self.finish_preview(tracks=value, cancelled=self.cancel_requested)
+            return
+        index = self.batch[self.batch_position]
+        self.completed.add(index)
+        self.update_row(index, 'Saved')
+        self.append_log(f'Saved: {value["path"]}')
+        if value.get('tags'):
+            tags = value['tags']
+            self.append_log(f'Verified tags: Title={tags["title"]!r}; Artist={tags["artist"]!r}; Album={tags["album"]!r}')
+        if value.get('warning'):
+            self.append_log(value['warning'])
+        self.consecutive_failures = 0
+        self.close_job()
+        self.batch_position += 1
+        self.start_next()
+
+    def handle_error(self, value):
+        if self.kind == 'preview':
+            self.finish_preview(error=value['message'], cancelled=self.cancel_requested)
+            return
+        index = self.batch[self.batch_position]
+        self.update_row(index, 'Needs sign-in' if value.get('needs_sign_in') else 'Failed')
+        self.append_log(f'Skipped: {self.tracks[index].title}: {value["message"]}' if value.get('video_only')
+                        else f'Failed: {self.tracks[index].title}: {value["message"]}')
+        self.consecutive_failures = 0 if value.get('video_only') else self.consecutive_failures + 1
+        self.close_job()
+        self.batch_position += 1
+        if value.get('stop_batch') or self.consecutive_failures >= 2:
+            self.finish_download('Stopped after download errors — retry unfinished songs when resolved')
+        else:
+            self.start_next()
+
+    def poll(self):
+        job = self.job
+        if job:
+            terminal = False
+            for kind, value in job.drain():
+                if kind == 'warning':
+                    self.append_log(value)
+                elif kind == 'status':
+                    self.last_detail = (f'{self.batch_position + 1}/{len(self.batch)}: ' if self.kind == 'download' else '') + value
+                    if not self.paused and not self.cancel_requested:
+                        self.status.set(self.last_detail)
+                elif kind == 'progress' and not self.cancel_requested:
+                    self.progress.configure(value=value)
+                elif kind == 'result':
+                    terminal = True
+                    self.handle_result(value)
+                    break
+                elif kind == 'error' and not self.cancel_requested:
+                    terminal = True
+                    self.handle_error(value)
+                    break
+            if not terminal and self.job is job and not job.alive:
+                job.exit_polls += 1
+                if self.cancel_requested:
+                    if self.kind == 'preview':
+                        self.finish_preview(cancelled=True)
+                    else:
+                        self.update_row(self.batch[self.batch_position], 'Cancelled')
+                        self.finish_download('Cancelled')
+                elif job.exit_polls > 2:
+                    self.handle_error({'message': f'The background worker exited unexpectedly (code {job.process.exitcode}).', 'stop_batch': True})
+        if self.close_after and not self.busy:
+            self.destroy()
+            return
+        self.timer = self.root.after(100, self.poll)
+
+    def destroy(self):
+        if self.timer:
+            self.root.after_cancel(self.timer)
+        self.root.destroy()
+
+    def close(self):
+        if self.busy:
+            if messagebox.askyesno('Download in progress', 'Cancel the current process and close? Completed songs will be kept.'):
+                self.close_after = True
+                self.cancel()
+        else:
+            self.destroy()
+
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) == 3 and sys.argv[1] == '--self-test':
+        from ytd_smoke import run_self_test
+        raise SystemExit(run_self_test(sys.argv[2]))
+    root = tk.Tk()
+    App(root)
+    root.mainloop()

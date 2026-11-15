@@ -1,0 +1,48 @@
+name: Build Windows desktop app
+on:
+  workflow_dispatch:
+  push:
+    branches: [gitbranch, main, master]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - run: python -m pip install -r requirements.txt "pyinstaller>=6,<7"
+      - run: python -m unittest discover -s tests -v
+      - run: python -m PyInstaller --noconfirm --clean --windowed --onedir --name YTD3 --collect-all imageio_ffmpeg --collect-all yt_dlp --collect-all yt_dlp_ejs --collect-all nodejs_wheel YTdownloader.py
+      - name: Test packaged worker, audio, WebP cover, and tags
+        shell: pwsh
+        run: |
+          $report = Join-Path $PWD 'packaged-self-test.json'
+          $probe = Start-Process -FilePath dist\YTD3\YTD3.exe -ArgumentList @('--self-test', $report) -PassThru
+          if (-not $probe.WaitForExit(90000)) {
+            Stop-Process -Id $probe.Id
+            throw 'Packaged worker check timed out'
+          }
+          if (-not (Test-Path $report)) { throw 'Packaged worker produced no report' }
+          Get-Content $report
+          $result = Get-Content $report -Raw | ConvertFrom-Json
+          if (-not $result.success) { throw 'Packaged worker check failed' }
+      - name: Check that the executable stays open
+        shell: pwsh
+        run: |
+          $app = Start-Process -FilePath dist\YTD3\YTD3.exe -PassThru
+          try {
+            Start-Sleep -Seconds 8
+            if ($app.HasExited) { throw "YTD3 exited during startup: $($app.ExitCode)" }
+          } finally {
+            if (-not $app.HasExited) { Stop-Process -Id $app.Id }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YTD3-Windows-0.3.5
+          path: dist/YTD3/
+          if-no-files-found: error
