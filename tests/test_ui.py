@@ -252,3 +252,24 @@ class DesktopTests(unittest.TestCase):
         self.assertIn('Album/First.mp3', contents)
         self.assertIn('Verified tags', contents)
         self.assertNotIn('private-session.txt', contents)
+
+    def test_song_list_stays_at_fifteen_rows_and_extra_height_goes_to_log(self):
+        self.load_preview()
+        for index in range(2, 35):
+            track = Track(f'https://youtu.be/{index}', str(index), f'Song {index}', 'Artist')
+            self.app.tracks.append(track)
+            self.app.tree.insert('', 'end', iid=str(index), text=track.title,
+                                 values=(track.artist, '', '', 'Ready'))
+        self.root.deiconify()
+        self.root.geometry('1120x850')
+        self.root.update()
+        visible = [item for item in self.app.tree.get_children() if self.app.tree.bbox(item)]
+        self.assertEqual(len(visible), 15)
+        before = (self.root.winfo_height(), self.app.tree.winfo_height(), self.app.log.winfo_height())
+        self.root.geometry('1120x1050')
+        self.root.update()
+        visible = [item for item in self.app.tree.get_children() if self.app.tree.bbox(item)]
+        self.assertEqual(len(visible), 15)
+        self.assertEqual(self.app.tree.winfo_height(), before[1])
+        if self.root.winfo_height() > before[0]:
+            self.assertGreater(self.app.log.winfo_height(), before[2])

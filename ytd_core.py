@@ -227,7 +227,7 @@ def track_from_info(info, *, album='', number='', albumartist=''):
     if not artwork and video_id:
         artwork = f'https://img.youtube.com/vi/{video_id}/maxresdefault.jpg'
     url = info.get('webpage_url') or info.get('url') or ''
-    if urlparse(url).hostname not in ('www.youtube.com', 'youtube.com', 'music.youtube.com', 'youtu.be'):
+    if video_id or urlparse(url).hostname not in ('www.youtube.com', 'youtube.com', 'music.youtube.com', 'youtu.be'):
         url = f'https://www.youtube.com/watch?v={video_id}'
     return Track(
         url=url, video_id=video_id, title=title,
@@ -255,10 +255,24 @@ def clean_album_name(title, artist=''):
     return clean_track_title(title)
 
 
-def preview(url, album_mode='Album', *, cookies_file=None, workdir=None, report=lambda *_: None):
-    from yt_dlp import YoutubeDL
+def preview_target(url):
+    """A watch/share URL's radio context is not a request for that mix."""
     parsed = validate_url(url)
     playlist_id = parse_qs(parsed.query).get('list', [''])[0]
+    video_id = source_video_id(url)
+    if playlist_id.startswith('RD'):
+        if not video_id:
+            raise ValueError('This is a radio/mix link. Paste the song\'s watch or share URL to download one song, '
+                             'or use a saved playlist URL for a whole playlist.')
+        return f'https://www.youtube.com/watch?v={video_id}', ''
+    if playlist_id:
+        return f'https://www.youtube.com/playlist?list={playlist_id}', playlist_id
+    return (f'https://www.youtube.com/watch?v={video_id}' if video_id else url), ''
+
+
+def preview(url, album_mode='Album', *, cookies_file=None, workdir=None, report=lambda *_: None):
+    from yt_dlp import YoutubeDL
+    request_url, playlist_id = preview_target(url)
     playlist = bool(playlist_id)
     album_mode = {True: 'Album', False: 'Mixed playlist'}.get(album_mode, album_mode)
     treat_as_album = playlist and (album_mode == 'Album' or (album_mode == 'Auto' and is_album_playlist(url)))
@@ -268,8 +282,6 @@ def preview(url, album_mode='Album', *, cookies_file=None, workdir=None, report=
                                     public_album_preview=playlist_id.startswith('OLAK5uy_'))
         options.update({'extract_flat': 'in_playlist' if playlist else False, 'skip_download': True,
                         'noplaylist': not playlist, 'ignoreerrors': False})
-        # A Music watch URL with list= explicitly means the entire playlist.
-        request_url = f'https://www.youtube.com/playlist?list={playlist_id}' if playlist else url
         report('status', 'Reading playlist details…' if playlist else 'Reading song details…')
         try:
             with YoutubeDL(options) as downloader:
@@ -520,6 +532,9 @@ def source_video_id(url):
         return ''
     if parsed.hostname in ('youtu.be', 'www.youtu.be'):
         return parsed.path.strip('/').split('/')[0]
+    segments = parsed.path.strip('/').split('/')
+    if len(segments) > 1 and segments[0] in ('shorts', 'live', 'embed'):
+        return segments[1]
     return parse_qs(parsed.query).get('v', [''])[0]
 
 

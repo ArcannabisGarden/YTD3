@@ -1,10 +1,10 @@
-# YTD3 desktop 0.3.4
+# YTD3 desktop 0.3.5
 
 A Windows desktop app for saving YouTube audio as tagged MP3 files. Requires Windows 10/11 (64-bit) and an internet connection. Download content you have permission to save.
 
 ## Run on Windows
 
-Download the **YTD3-Windows-0.3.4** artifact from the latest successful GitHub Actions run. Extract the whole ZIP into a new folder, then run **YTD3.exe**. Keep its supporting files together. The window title shows **0.3.4**. Python, FFmpeg, and Node do not need to be installed separately.
+Download the **YTD3-Windows-0.3.5** artifact from the latest successful GitHub Actions run. Extract the whole ZIP into a new folder, then run **YTD3.exe**. Keep its supporting files together. The window title shows **0.3.5**. Python, FFmpeg, and Node do not need to be installed separately.
 
 To run from source, install 64-bit Python 3.11 or newer from https://www.python.org/downloads/windows/ with its launcher enabled, extract the source, and double-click `start_windows.bat`. That development launcher opens one setup terminal to install dependencies; the packaged app runs without a console.
 
@@ -16,7 +16,7 @@ To run from source, install 64-bit Python 3.11 or newer from https://www.python.
 4. **Open artwork preview** opens the image URL in your browser. Use a direct image URL for replacement art. WebP, PNG, JPEG, GIF, and other supported raster images are converted to JPEG for embedding; blank means no cover. YouTube thumbnails are suggestions, not verified album covers.
 5. Choose the Save to parent folder and click **Download / update songs**. Songs with album tags are saved inside a subfolder named after that album. Songs without an album stay directly in the parent folder. Filenames use the song title only: for example `Disclaimer II/Gasoline.mp3`, with Seether stored separately in the artist tag. The selected song's output path is displayed beside Pause/Cancel before downloading.
 
-A link containing `list=` loads that playlist. Remove the `list` parameter to preview only the linked video. Edits stay in the current preview; loading a different link replaces it. Only the output folder is remembered across app restarts.
+Normal saved-playlist links (including album/watch links with `list=OLAK…` or `list=PL…`) load the playlist. A watch/share link with `list=RD…` is a song with radio context: version 0.3.5 ignores that context and previews only the linked song. A standalone radio/mix URL without a video is not treated as a saved playlist; use the song's watch/share link instead. Remove the `list` parameter from any other watch URL to preview only its video. Edits stay in the current preview; loading a different link replaces it. Only the output folder is remembered across app restarts.
 
 ## Pause, cancel, and retry
 
@@ -50,7 +50,7 @@ WebM audio is preferred, with other-audio fallback, as in the original script. I
 
 On Windows, run `build_windows.bat`. It builds `dist\YTD3\YTD3.exe` and the required supporting files. ZIP and share the **entire `dist\YTD3` folder**, not just the EXE. Preserve bundled dependency license files. The application is unsigned; code signing can be added for wider distribution.
 
-GitHub Actions builds the same folder and publishes **YTD3-Windows-0.3.4** as an artifact. Artifacts require GitHub sign-in and expire according to repository retention settings. Keep your own copy if needed longer. The workflow checks source tests, real worker pause/resume/cancel, and a packaged worker self-test that retrieves a generated audio tone over local HTTP, executes bundled Node/FFmpeg, and verifies MP3 tags plus a real WebP-to-JPEG embedded cover. These checks do not prove YouTube access from a user's connection. Live playback on the reported YouTube Music album could not be verified from the development cloud network because its gateway rejects that destination.
+GitHub Actions builds the same folder and publishes **YTD3-Windows-0.3.5** as an artifact. Artifacts require GitHub sign-in and expire according to repository retention settings. Keep your own copy if needed longer. The workflow checks source tests, real worker pause/resume/cancel, and a packaged worker self-test that retrieves a generated audio tone over local HTTP, executes bundled Node/FFmpeg, and verifies MP3 tags plus a real WebP-to-JPEG embedded cover. These checks do not prove YouTube access from a user's connection. Live playback on the reported YouTube Music album could not be verified from the development cloud network because its gateway rejects that destination.
 
 ## Development
 
@@ -67,3 +67,5 @@ See [Original behavior and regression coverage](ORIGINAL_BEHAVIOR.md) for the fe
 Version 0.3.3 removes leading album-type labels such as `Album -` or `Album:` and uses title-only MP3 filenames. Existing files under `Album - Disclaimer II/Seether - Gasoline.mp3` can be repaired into `Disclaimer II/Gasoline.mp3` using the same Save to parent folder. An empty old album folder is removed after a successful move; folders containing other files are kept. The packaged self-test verifies this exact migration, the saved ID3 tags, artwork, and unchanged audio bytes.
 
 Version 0.3.4 configures yt-dlp's documented public-album preview fallback for `OLAK5uy_…` release playlists. If the album webpage fails to load, its public track-list API can still be attempted instead of stopping at the playlist session precheck. This setting is scoped to public album metadata previews, with or without a selected cookie file. Other/private playlists keep the default check; video downloads and age-verification requirements are unchanged. The real webpage or API can still fail or be blocked. The log retains those request warnings, and preview errors identify the playlist/session stage. The packaged self-test now reproduces a missing webpage with an authenticated session and verifies both public fallback and the default guard without making live YouTube requests.
+
+Version 0.3.5 fixes single-song YouTube Music share URLs carrying a radio-mix parameter, including `watch?v=GNCd_ERZvZM&list=RDAMVMGNCd_ERZvZM`. They are requested as a canonical single video with playlist extraction disabled, with or without a session file. The song list is capped at 15 visible rows, the metadata form is more compact, and extra window height goes to the larger log area. A Windows layout check measures the visible row count at multiple window heights.

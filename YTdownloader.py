@@ -16,7 +16,8 @@ import webbrowser
 from ytd_core import Track, validate_track, validate_url, format_error, relative_output_path
 from ytd_jobs import WorkerJob
 
-APP_VERSION = '0.3.4'
+APP_VERSION = '0.3.5'
+VISIBLE_SONG_ROWS = 15
 FIELDS = [('title', 'Title'), ('artist', 'Artist'), ('album', 'Album'),
           ('albumartist', 'Album artist'), ('track', 'Track number'),
           ('year', 'Year'), ('genre', 'Genre'), ('artwork', 'Artwork URL')]
@@ -96,10 +97,10 @@ class App:
         self.clear_session_button.pack(side='left')
         ttk.Label(session, textvariable=self.session_label).pack(side='left', padx=10)
         middle = ttk.Frame(panel)
-        middle.pack(fill='both', expand=True)
+        middle.pack(fill='x', expand=False)
         left = ttk.Frame(middle)
-        left.pack(side='left', fill='both', expand=True, padx=(0, 16))
-        self.tree = ttk.Treeview(left, columns=('artist', 'album', 'track', 'state'), selectmode='browse', height=8)
+        left.pack(side='left', fill='x', expand=True, anchor='n', padx=(0, 16))
+        self.tree = ttk.Treeview(left, columns=('artist', 'album', 'track', 'state'), selectmode='browse', height=VISIBLE_SONG_ROWS)
         for key, label, width in [('#0', 'Song', 190), ('artist', 'Artist', 120),
                                    ('album', 'Album', 120), ('track', '#', 38), ('state', 'Status', 95)]:
             self.tree.heading(key, text=label)
@@ -113,12 +114,12 @@ class App:
         right.pack(side='left', fill='both')
         self.entries = []
         for row, (key, label) in enumerate(FIELDS):
-            ttk.Label(right, text=label).grid(row=row * 2, column=0, sticky='w', pady=(3, 0))
-            entry = ttk.Entry(right, textvariable=self.values[key], width=34, state='disabled')
-            entry.grid(row=row * 2 + 1, column=0, sticky='ew')
+            ttk.Label(right, text=label).grid(row=row, column=0, sticky='w', padx=(0, 8), pady=3)
+            entry = ttk.Entry(right, textvariable=self.values[key], width=27, state='disabled')
+            entry.grid(row=row, column=1, sticky='ew', pady=3)
             self.entries.append(entry)
         self.art_button = ttk.Button(right, text='Open artwork preview', command=self.show_artwork, state='disabled')
-        self.art_button.grid(row=16, column=0, sticky='w', pady=6)
+        self.art_button.grid(row=len(FIELDS), column=0, columnspan=2, sticky='w', pady=6)
         ttk.Label(panel, text='Songs with an album are saved in an album subfolder. Existing app downloads can have their tags and artwork updated.').pack(anchor='w', pady=(10, 6))
         output = ttk.Frame(panel)
         output.pack(fill='x')
@@ -140,8 +141,8 @@ class App:
         self.progress = ttk.Progressbar(panel, maximum=100)
         self.progress.pack(fill='x', pady=(6, 6))
         ttk.Label(panel, textvariable=self.status, wraplength=1040).pack(anchor='w')
-        self.log = tk.Text(panel, height=4, wrap='word', state='disabled', font=('Segoe UI', 9))
-        self.log.pack(fill='x', pady=(6, 0))
+        self.log = tk.Text(panel, height=8, wrap='word', state='disabled', font=('Segoe UI', 9))
+        self.log.pack(fill='both', expand=True, pady=(6, 0))
 
     def update_row(self, index, state=None):
         track = self.tracks[index]

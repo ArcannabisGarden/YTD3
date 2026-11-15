@@ -6,7 +6,7 @@ The desktop app initially replaced too much of this workflow. This inventory rec
 
 | Original capability | Current behavior |
 | --- | --- |
-| Single-video and playlist modes | Both supported. A URL with `list=` previews the playlist. A single video is never given a fabricated album based on its song title. |
+| Single-video and playlist modes | Both supported. Normal saved-playlist URLs preview the playlist; watch/share URLs with `list=RD…` preview only the linked video instead of requesting its dynamic radio mix. A single video is never given a fabricated album based on its song title. |
 | Playlists treated as albums | **Album** is the default again. Playlist title and position supply album name and track number. **Auto** and **Mixed playlist** remain explicit alternatives. Missing album titles fall back to Unknown Album. |
 | Folder named after the cleaned album | Restored. Songs with an album tag go under `Save to / album name /`. Songs without an album tag stay directly under Save to. This also organizes individual songs when they have an album tag. |
 | `clean_artist_name` removes ` - Topic` | Retained and applied to structured artist fields as well as uploader/channel guesses. |
