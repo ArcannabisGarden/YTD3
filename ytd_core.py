@@ -311,6 +311,8 @@ def preview(url, album_mode='Album', *, cookies_file=None, workdir=None, report=
         for track in tracks:
             track.albumartist = track.albumartist or albumartist
             track.album = clean_album_name(track.album, album_hint) or 'Unknown Album'
+    elif not playlist:
+        tracks[0].albumartist = tracks[0].albumartist or tracks[0].artist
     return tracks
 
 

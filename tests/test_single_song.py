@@ -2,6 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from mutagen.mp3 import MP3
 
 import ytd_core as core
 from ytd_smoke import make_tone
@@ -56,6 +57,7 @@ class SingleSongTests(unittest.TestCase):
                     self.assertEqual(tracks[0].url, SINGLE_SONG_URL)
                     self.assertEqual((tracks[0].title, tracks[0].artist, tracks[0].album, tracks[0].track),
                                      ('Example Song', 'Example Artist', 'Example Album', '3'))
+                    self.assertEqual(tracks[0].albumartist, 'Example Artist')
             self.assertEqual(session.read_bytes(), original)
 
     def test_reported_single_link_saves_one_tagged_mp3_without_extracting_radio_mix(self):
@@ -78,4 +80,5 @@ class SingleSongTests(unittest.TestCase):
             self.assertEqual(core.read_saved_tags(path), {'title': 'Example Song', 'artist': 'Example Artist',
                                                         'album': 'Example Album', 'track': '3'})
             self.assertEqual(len(list(Path(folder).rglob('*.mp3'))), 1)
+            self.assertEqual(str(MP3(path).tags['TPE2']), 'Example Artist')
             self.assertEqual(warning, '')

@@ -261,14 +261,25 @@ class DesktopTests(unittest.TestCase):
             self.app.tree.insert('', 'end', iid=str(index), text=track.title,
                                  values=(track.artist, '', '', 'Ready'))
         self.root.deiconify()
+        def visible_rows():
+            # bbox() also returns a box for the next, clipped row in Vista.
+            # Count rows whose center can actually be seen/hit in the widget.
+            result = []
+            for item in self.app.tree.get_children():
+                box = self.app.tree.bbox(item)
+                if box:
+                    center = box[1] + box[3] // 2
+                    if center < self.app.tree.winfo_height() and self.app.tree.identify_row(center) == item:
+                        result.append(item)
+            return result
         self.root.geometry('1120x850')
         self.root.update()
-        visible = [item for item in self.app.tree.get_children() if self.app.tree.bbox(item)]
+        visible = visible_rows()
         self.assertEqual(len(visible), 15)
         before = (self.root.winfo_height(), self.app.tree.winfo_height(), self.app.log.winfo_height())
         self.root.geometry('1120x1050')
         self.root.update()
-        visible = [item for item in self.app.tree.get_children() if self.app.tree.bbox(item)]
+        visible = visible_rows()
         self.assertEqual(len(visible), 15)
         self.assertEqual(self.app.tree.winfo_height(), before[1])
         if self.root.winfo_height() > before[0]:
