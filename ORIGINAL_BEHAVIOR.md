@@ -2,7 +2,7 @@
 
 Baseline: [`YTdownloader.py` at 2744eb2](https://github.com/ArcannabisGarden/YTD3/blob/2744eb2cd410bc6908400f77cbe176d79ca3954f/YTdownloader.py).
 
-The desktop app initially replaced too much of this workflow. This inventory records the original behavior, what version 0.3.2 restores, and the deliberate differences. Regression checks are in `tests/test_original_behavior.py`; general metadata, download, and UI checks remain in the other test files.
+The desktop app initially replaced too much of this workflow. This inventory records the original behavior, what version 0.3.3 restores, and the deliberate differences. Regression checks are in `tests/test_original_behavior.py`; general metadata, download, and UI checks remain in the other test files.
 
 | Original capability | Current behavior |
 | --- | --- |
@@ -13,7 +13,7 @@ The desktop app initially replaced too much of this workflow. This inventory rec
 | `split_artist_from_title` handles hyphen, en dash, em dash, spaced colon, and pipe | Restored. A known artist prefix is stripped first, including without spaces and regardless of capitalization. |
 | `force_strip_artist_prefix` removes duplicated artist names | Applied to extractor `track` fields too. The reported `seether - Gasoline` example becomes artist Seether, title Gasoline. |
 | `clean_track_title` removes leftover boundary punctuation and whitespace | Restored for isolated separators such as ` - Gasoline - `. Genuine punctuation such as Love-Hate, -Human, and Fine Again - Acoustic is retained. |
-| Playlist title cleaned into an album name | Artist prefixes, isolated leading separators, and recognized Full Album/Official/EP/LP wrapper labels are removed. Actual album words and version labels are kept. |
+| Playlist title cleaned into an album name | Artist prefixes, isolated leading separators, and recognized Album/Full Album/Official/EP/LP wrapper labels are removed. Leading `album -` and `Album:` type labels are stripped, including when nested with an artist prefix. Actual album words and version labels are kept. |
 | Windows filename sanitation | Restored `:` → `꞉`, plus replacements for forbidden Windows characters. Reserved device names, empty names, and excessive length also have safeguards. |
 | WebM audio preference with other-audio fallback | Restored through yt-dlp's format selector. The best available WebM audio is preferred, then other audio, then a combined stream if necessary. |
 | V0 VBR MP3 via libmp3lame | Retained, using FFmpeg directly. No additional encode is performed when repairing an existing app-created MP3. |
@@ -24,6 +24,8 @@ The desktop app initially replaced too much of this workflow. This inventory rec
 
 ## Explicit differences
 
+- Version 0.3.3 saves title-only filenames (`Disclaimer II/Gasoline.mp3`), keeping the artist in its tag. Earlier artist-prefixed filenames are recognized and renamed during repair. The UI previews the output path, and the log reads actual saved ID3 values back after each successful operation.
+
 - The original title normalization could remove words inside legitimate names, and removed every parenthesized/bracketed version label. The current cleanup removes recognized promotional labels while retaining Live/Remix/featured-artist information and genuine punctuation. The preview remains editable.
 - The original album normalization removed the words album/EP/LP/official/playlist anywhere. The current version removes identified wrapper labels and prefixes, while retaining actual names such as The Album.
 - Album artist can differ from song artist, particularly for collaborations/compilations. The field remains editable.
@@ -32,7 +34,7 @@ The desktop app initially replaced too much of this workflow. This inventory rec
 
 ## Repairing files created by earlier desktop versions
 
-Re-preview the playlist in version 0.3.2, check the fields, choose the same Save to parent folder, and click **Download / update songs**. A valid existing MP3 is matched by its embedded source video URL, copied to temporary storage, updated, and published in the album folder. Existing audio bytes, lyrics, comments, ratings, and unrelated tags are retained. Optional year/genre and other optional metadata already present are retained when the preview has no value; explicit field changes, including clearing a value, take priority. The previous file is removed only after the updated copy is safely saved; if that removal fails, the log identifies that the old copy remains.
+Re-preview the playlist in version 0.3.3, check the fields, choose the same Save to parent folder, and click **Download / update songs**. A valid existing MP3 is matched by its embedded source video URL, copied to temporary storage, updated, and published in the album folder. Existing audio bytes, lyrics, comments, ratings, and unrelated tags are retained. Optional year/genre and other optional metadata already present are retained when the preview has no value; explicit field changes, including clearing a value, take priority. The previous file is removed only after the updated copy is safely saved; if that removal fails, the log identifies that the old copy remains.
 
 A successful cover update replaces the front-cover data with JPEG. If a replacement cannot be fetched, an existing cover is retained and a warning is logged. Repeating the operation with the same cover URL reuses an already-valid cached JPEG cover. Clearing the artwork field explicitly removes cover art.
 

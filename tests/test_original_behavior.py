@@ -74,6 +74,52 @@ class OriginalBehaviorTests(unittest.TestCase):
         self.assertEqual(core.clean_album_name('The Album'), 'The Album')
         self.assertEqual(core.safe_filename('Album: Part I'), 'Album꞉ Part I')
 
+    def test_reported_disclaimer_ii_album_label_is_not_part_of_album_name(self):
+        for title in ('album - Disclaimer II', 'Album: Disclaimer II',
+                      'Album - Seether - Disclaimer II', 'Seether - Album - Disclaimer II'):
+            with self.subTest(title=title):
+                self.assertEqual(core.clean_album_name(title, 'Seether'), 'Disclaimer II')
+        self.assertEqual(core.clean_album_name('Album of the Year'), 'Album of the Year')
+
+    def test_lead_artist_prefix_is_removed_with_multiple_artist_metadata(self):
+        track = core.track_from_info({'id': 'example', 'track': 'Seether - Broken',
+            'title': 'Broken', 'artists': ['Seether', 'Amy Lee'], 'channel': 'Uploader'})
+        self.assertEqual(track.title, 'Broken')
+        self.assertEqual(track.artist, 'Seether, Amy Lee')
+        solo = core.track_from_info({'id': 'example', 'track': 'seether - Gasoline',
+            'title': 'Gasoline', 'artists': 'Seether'})
+        self.assertEqual((solo.title, solo.artist), ('Gasoline', 'Seether'))
+
+    def test_exact_reported_folder_filename_and_title_are_repaired_together(self):
+        info = {'title': 'album - Disclaimer II', 'entries': [
+            {'id': 'example', 'title': 'seether - Gasoline', 'track': 'seether - Gasoline',
+             'artist': 'Seether', 'channel': 'Seether - Topic', 'thumbnail': 'https://images.example/cover.webp'}]}
+        with patch('yt_dlp.YoutubeDL') as factory:
+            factory.return_value.__enter__.return_value.extract_info.return_value = info
+            track = core.preview('https://youtube.com/playlist?list=OLAK5uy_example')[0]
+        self.assertEqual(core.relative_output_path(track).as_posix(), 'Disclaimer II/Gasoline.mp3')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wrong_folder = root / 'Album - Disclaimer II'
+            wrong_folder.mkdir()
+            original = wrong_folder / 'Seether - Gasoline.mp3'
+            source = root / 'tone.wav'
+            make_tone(source)
+            core.convert(source, original)
+            core.write_tags(original, self.track(title='Seether - Gasoline', album='Album - Disclaimer II'))
+            audio = original.read_bytes()[MP3(original).info.frame_offset:]
+            with patch('ytd_core.fetch_audio') as download, patch('ytd_core.convert') as encode, \
+                 patch('ytd_core.urlopen', return_value=io.BytesIO(cover_bytes())):
+                result, _ = core.download_track(track, root)
+                download.assert_not_called()
+                encode.assert_not_called()
+            self.assertEqual(result, root / 'Disclaimer II' / 'Gasoline.mp3')
+            self.assertEqual(core.read_saved_tags(result), {'title': 'Gasoline', 'artist': 'Seether',
+                                                         'album': 'Disclaimer II', 'track': '1'})
+            self.assertEqual(result.read_bytes()[MP3(result).info.frame_offset:], audio)
+            self.assertFalse(wrong_folder.exists(), 'only the empty outdated album folder is removed')
+            self.assertTrue(root.is_dir(), 'the selected Save to folder must be retained')
+
     def test_webp_png_gif_and_jpeg_decode_to_embeddable_jpeg(self):
         for format in ('WEBP', 'PNG', 'GIF', 'JPEG'):
             with self.subTest(format=format):
@@ -129,7 +175,7 @@ class OriginalBehaviorTests(unittest.TestCase):
                 result, message = core.download_track(self.track(artwork='https://images.example/cover.webp'), root)
                 download.assert_not_called()
                 encode.assert_not_called()
-            self.assertEqual(result, root / 'Disclaimer' / 'Seether - Gasoline.mp3')
+            self.assertEqual(result, root / 'Disclaimer' / 'Gasoline.mp3')
             self.assertFalse(original.exists())
             self.assertEqual(result.read_bytes()[MP3(result).info.frame_offset:], audio_bytes)
             tags = ID3(result)
@@ -188,12 +234,12 @@ class OriginalBehaviorTests(unittest.TestCase):
             core.write_tags(original, self.track())
             destination = root / 'Disclaimer'
             destination.mkdir()
-            unrelated = destination / 'Seether - Gasoline.mp3'
+            unrelated = destination / 'Gasoline.mp3'
             core.convert(source, unrelated)
             core.write_tags(unrelated, self.track(url='https://youtu.be/different'))
             unrelated_bytes = unrelated.read_bytes()
             result, _ = core.download_track(self.track(), root)
-            self.assertEqual(result.name, 'Seether - Gasoline (2).mp3')
+            self.assertEqual(result.name, 'Gasoline (2).mp3')
             self.assertEqual(unrelated.read_bytes(), unrelated_bytes)
             self.assertFalse(original.exists())
 

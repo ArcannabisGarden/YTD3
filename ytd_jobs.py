@@ -24,7 +24,7 @@ class EventWriter:
 def _worker_main(kind, payload, folder):
     # Frozen windowed applications have no stdout/stderr. Keep third-party
     # output private to the task instead of opening a console or crashing.
-    from ytd_core import Track, preview, download_track, format_error, DownloadFailure
+    from ytd_core import Track, preview, download_track, format_error, DownloadFailure, read_saved_tags
     folder = Path(folder)
     emit = EventWriter(folder / 'events')
     with (folder / 'worker.log').open('w', encoding='utf-8') as log, \
@@ -38,7 +38,7 @@ def _worker_main(kind, payload, folder):
                 target, warning = download_track(Track(**payload['track']), payload['output'],
                     progress=lambda percent: emit('progress', percent), workdir=payload['media_dir'],
                     cookies_file=payload.get('cookies_file'), session_dir=folder, report=emit)
-                emit('result', {'path': str(target), 'warning': warning})
+                emit('result', {'path': str(target), 'warning': warning, 'tags': read_saved_tags(target)})
             elif kind == 'diagnostic':
                 from ytd_smoke import worker_diagnostic
                 emit('result', worker_diagnostic(folder))

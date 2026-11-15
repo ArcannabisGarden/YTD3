@@ -226,3 +226,29 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(self.app.busy)
         self.app.download()
         self.assertEqual(self.app.batch, [0, 1])
+
+    def test_output_preview_tracks_title_changes_without_artist_prefix(self):
+        self.load_preview()
+        self.app.values['artist'].set('Seether')
+        self.app.values['title'].set('Gasoline')
+        self.app.values['album'].set('Disclaimer II')
+        self.assertEqual(self.app.output_preview.get(), 'Output: Disclaimer II/Gasoline.mp3')
+        self.app.tree.selection_set('1')
+        self.root.update()
+        self.assertEqual(self.app.output_preview.get(), 'Output: Album/Second.mp3')
+
+    def test_saved_log_includes_actual_tags_and_filename_preview(self):
+        self.load_preview()
+        self.app.cookies_file = 'private-session.txt'
+        self.app.download()
+        self.app.job.events.append(('result', {'path': 'First.mp3', 'warning': '',
+            'tags': {'title': 'First', 'artist': 'Artist', 'album': 'Album', 'track': '1'}}))
+        self.app.poll()
+        self.assertIn("Verified tags: Title='First'; Artist='Artist'; Album='Album'", self.app.log.get('1.0', 'end'))
+        destination = Path(self.temporary.name) / 'log.txt'
+        with patch('YTdownloader.filedialog.asksaveasfilename', return_value=str(destination)):
+            self.app.save_log()
+        contents = destination.read_text(encoding='utf-8')
+        self.assertIn('Album/First.mp3', contents)
+        self.assertIn('Verified tags', contents)
+        self.assertNotIn('private-session.txt', contents)

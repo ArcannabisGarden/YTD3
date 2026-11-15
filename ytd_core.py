@@ -180,13 +180,24 @@ def track_from_info(info, *, album='', number='', albumartist=''):
     guessed_title, guessed_artist = guess_metadata(
         info.get('title') or 'Untitled', info.get('channel') or info.get('uploader') or 'Unknown Artist')
     artists = info.get('artists') or []
+    if isinstance(artists, str):
+        artists = [artists]
     supplied_artist = info.get('artist') or ', '.join(artists)
     artist = clean_artist_name(supplied_artist or guessed_artist)
     if info.get('track') or supplied_artist:
         # Structured fields can still contain "seether - Gasoline". Apply the
         # original prefix cleanup here too, before the user reviews the tags.
-        title = clean_track_title(force_strip_artist_prefix(
-            clean_title(info.get('track') or info.get('title') or 'Untitled'), artist))
+        title = clean_title(info.get('track') or info.get('title') or 'Untitled')
+        # Multi-artist metadata can list "Seether, Amy Lee" while the title
+        # prefixes only the lead artist. Restrict aliases to supplied names
+        # and the channel rather than splitting a genuine hyphenated title.
+        aliases = [artist, *artists, info.get('album_artist'), info.get('channel'), info.get('uploader')]
+        for alias in aliases:
+            stripped = force_strip_artist_prefix(title, clean_artist_name(alias))
+            if stripped != title:
+                title = stripped
+                break
+        title = clean_track_title(title)
     else:
         title = guessed_title
     thumbnails = info.get('thumbnails') or []
@@ -209,8 +220,16 @@ def track_from_info(info, *, album='', number='', albumartist=''):
 
 
 def clean_album_name(title, artist=''):
-    if artist:
-        title = re.sub(r'^' + re.escape(artist) + r'\s*[-–—:|.]\s*', '', title, flags=re.I)
+    # Strip explicit type labels only when followed by a separator. Keep real
+    # names such as The Album and Album of the Year. Labels and artist names
+    # can be nested in either order in YouTube Music playlist titles.
+    while True:
+        previous = title
+        title = re.sub(r'^\s*(?:album|full album|official album|playlist|ep|lp)\s*[-–—:|]\s*', '', title, flags=re.I)
+        if artist:
+            title = re.sub(r'^' + re.escape(artist) + r'\s*[-–—:|.]\s*', '', title, flags=re.I)
+        if title == previous:
+            break
     title = re.sub(r'\s*[\[(](?:full album|official album|official|playlist|ep|lp)[\])]\s*', ' ', title, flags=re.I)
     title = re.sub(r'\s+[-–—|:]\s*(?:full album|official album|official playlist|playlist|ep|lp)$', '', title, flags=re.I)
     return clean_track_title(title)
@@ -286,6 +305,15 @@ def safe_filename(value):
     if re.fullmatch(r'(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?', value, re.I):
         value = '_' + value
     return value
+
+
+def filename_stem(track):
+    # The performer belongs in its artist tag, not prepended to the filename.
+    return safe_filename(track.title)
+
+
+def relative_output_path(track):
+    return album_folder(track, Path()) / (filename_stem(track) + '.mp3')
 
 
 def available_path(folder, stem):
@@ -478,9 +506,12 @@ def matching_existing_download(track, folder, *, require_matching_tags=True, sea
     """Find valid audio by source; optionally require unchanged text tags."""
     from mutagen import MutagenError
     from mutagen.mp3 import MP3
-    stem = safe_filename(f'{track.artist} - {track.title}')
-    candidates = [Path(folder) / f'{stem}.mp3']
-    candidates.extend(Path(folder).glob(glob.escape(stem) + ' ([0-9]*).mp3'))
+    candidates = []
+    # Accept names from earlier builds when repairing, then publish the new
+    # title-only name. Source tags still identify the correct recording.
+    for stem in dict.fromkeys((filename_stem(track), safe_filename(f'{track.artist} - {track.title}'))):
+        candidates.append(Path(folder) / f'{stem}.mp3')
+        candidates.extend(Path(folder).glob(glob.escape(stem) + ' ([0-9]*).mp3'))
     if not require_matching_tags:
         candidates.extend(Path(folder).glob('*.mp3'))
         if search_subfolders:
@@ -511,6 +542,13 @@ def album_folder(track, root):
     return Path(root) / safe_filename(track.album) if track.album.strip() else Path(root)
 
 
+def read_saved_tags(path):
+    from mutagen.id3 import ID3
+    tags = ID3(path)
+    return {name: str(tags.get(frame, '')) for name, frame in (
+        ('title', 'TIT2'), ('artist', 'TPE1'), ('album', 'TALB'), ('track', 'TRCK'))}
+
+
 def merge_existing_metadata(track, existing):
     from mutagen.id3 import ID3
     tags = ID3(existing)
@@ -531,7 +569,7 @@ def update_existing_song(existing, track, destination, temporary, report):
     report('status', 'Updating existing song details and artwork; keeping its audio…')
     warning = write_tags(updated, track, encoded=False,
                          preserve_empty_artwork=not track.artwork and 'artwork' not in track.edited_fields)
-    stem = safe_filename(f'{track.artist} - {track.title}')
+    stem = filename_stem(track)
     if existing.parent.resolve() == destination.resolve() and re.fullmatch(
             re.escape(stem) + r'(?: \([0-9]+\))?\.mp3', existing.name, re.I):
         os.replace(updated, existing)
@@ -564,6 +602,12 @@ def download_track(track, folder, progress=lambda percent: None, *, workdir=None
         temporary = Path(temporary)
         if existing:
             target, warning = update_existing_song(existing, track, folder, temporary, report)
+            previous_folder = existing.parent
+            if previous_folder != folder and previous_folder.resolve() != root.resolve() and previous_folder.parent.resolve() == root.resolve():
+                try:
+                    previous_folder.rmdir()  # Only removes an empty old folder.
+                except OSError:
+                    pass
             progress(100)
             return target, warning
         source = fetch_audio(track.url, temporary, progress, cookies_file=cookies_file,
@@ -573,5 +617,5 @@ def download_track(track, folder, progress=lambda percent: None, *, workdir=None
         convert(source, converted)
         report('status', 'Writing song details and artwork…')
         warning = write_tags(converted, track)
-        target = publish_file(converted, folder, safe_filename(f'{track.artist} - {track.title}'))
+        target = publish_file(converted, folder, filename_stem(track))
     return target, warning

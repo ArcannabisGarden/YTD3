@@ -13,10 +13,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import webbrowser
 
-from ytd_core import Track, validate_track, validate_url, format_error
+from ytd_core import Track, validate_track, validate_url, format_error, relative_output_path
 from ytd_jobs import WorkerJob
 
-APP_VERSION = '0.3.2'
+APP_VERSION = '0.3.3'
 FIELDS = [('title', 'Title'), ('artist', 'Artist'), ('album', 'Album'),
           ('albumartist', 'Album artist'), ('track', 'Track number'),
           ('year', 'Year'), ('genre', 'Genre'), ('artwork', 'Artwork URL')]
@@ -51,6 +51,7 @@ class App:
         self.album_mode = tk.StringVar(value='Album')
         self.cookies_file = ''  # Session files are never remembered in settings.
         self.session_label = tk.StringVar(value='No session file selected')
+        self.output_preview = tk.StringVar(value='Select a song to see its output name.')
         self.status = tk.StringVar(value='Paste a link to preview songs. Playlists use album folders and track order by default.')
         self.values = {key: tk.StringVar() for key, _ in FIELDS}
         try:
@@ -134,6 +135,7 @@ class App:
         self.pause_button.pack(side='left')
         self.cancel_button = ttk.Button(controls, text='Cancel', command=self.cancel, state='disabled')
         self.cancel_button.pack(side='left', padx=8)
+        ttk.Label(controls, textvariable=self.output_preview, wraplength=570).pack(side='left', padx=10)
         ttk.Button(controls, text='Save log…', command=self.save_log).pack(side='right')
         self.progress = ttk.Progressbar(panel, maximum=100)
         self.progress.pack(fill='x', pady=(6, 6))
@@ -157,6 +159,13 @@ class App:
                 track.edited_fields.append(key)
             setattr(track, key, value)
         self.update_row(self.current)
+        self.update_output_preview()
+
+    def update_output_preview(self):
+        if self.current is None:
+            self.output_preview.set('Select a song to see its output name.')
+        else:
+            self.output_preview.set('Output: ' + relative_output_path(self.tracks[self.current]).as_posix())
 
     def select(self, _=None):
         selected = self.tree.selection()
@@ -167,6 +176,7 @@ class App:
         for key, _ in FIELDS:
             self.values[key].set(getattr(self.tracks[self.current], key))
         self.loading_fields = False
+        self.update_output_preview()
         for entry in self.entries:
             entry.configure(state='disabled' if self.busy else 'normal')
         self.art_button.configure(state='disabled' if self.busy else 'normal')
@@ -200,7 +210,11 @@ class App:
                                           initialfile='YTD3-log.txt', filetypes=[('Text file', '*.txt')])
         if path:
             try:
-                Path(path).write_text(f'YTD3 {APP_VERSION}\n' + self.log.get('1.0', 'end'), encoding='utf-8')
+                names = [{'video_id': track.video_id, 'title': track.title, 'artist': track.artist,
+                          'album': track.album, 'output': relative_output_path(track).as_posix()}
+                         for track in self.tracks]
+                Path(path).write_text(f'YTD3 {APP_VERSION}\n' + self.log.get('1.0', 'end')
+                    + '\nSong names and output files:\n' + json.dumps(names, indent=2, ensure_ascii=False), encoding='utf-8')
             except OSError as exc:
                 messagebox.showerror('Could not save log', str(exc))
 
@@ -228,6 +242,7 @@ class App:
             messagebox.showinfo('YouTube link', str(exc))
             return
         self.current = None
+        self.update_output_preview()
         self.tracks = []
         self.completed.clear()
         self.tree.delete(*self.tree.get_children())
@@ -391,6 +406,9 @@ class App:
         self.completed.add(index)
         self.update_row(index, 'Saved')
         self.append_log(f'Saved: {value["path"]}')
+        if value.get('tags'):
+            tags = value['tags']
+            self.append_log(f'Verified tags: Title={tags["title"]!r}; Artist={tags["artist"]!r}; Album={tags["album"]!r}')
         if value.get('warning'):
             self.append_log(value['warning'])
         self.consecutive_failures = 0

@@ -202,12 +202,12 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             album_folder = Path(folder) / 'My edits'
             album_folder.mkdir()
-            existing = album_folder / 'Artist - Song (Live).mp3'
+            existing = album_folder / 'Song (Live).mp3'
             existing.write_bytes(b'keep')
             with patch('ytd_core.fetch_audio', side_effect=audio):
                 output, warning = core.download_track(self.track(album='My edits', track='3'), folder)
             self.assertEqual(existing.read_bytes(), b'keep')
-            self.assertEqual(output.name, 'Artist - Song (Live) (2).mp3')
+            self.assertEqual(output.name, 'Song (Live) (2).mp3')
             self.assertEqual(str(ID3(output)['TALB']), 'My edits')
             self.assertEqual(str(ID3(output)['TRCK']), '3')
             self.assertEqual(warning, '')
